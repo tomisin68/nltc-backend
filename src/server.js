@@ -17,12 +17,27 @@ const app  = express();
 const PORT = process.env.PORT || 3001;
 
 app.use(helmet());
+
+const ALLOWED_ORIGINS = [
+  'https://nltc-online.vercel.app',   // production frontend
+  'http://localhost:3000',             // local dev
+  'http://localhost:4000',
+  'http://127.0.0.1:5500',            // VS Code Live Server
+  // any extra origins from env (comma-separated)
+  ...( process.env.EXTRA_ORIGINS ? process.env.EXTRA_ORIGINS.split(',').map(o=>o.trim()) : [] ),
+];
+
 app.use(cors({
-  origin: (process.env.FRONTEND_URL || 'http://localhost:3000').split(',').map(o=>o.trim()),
+  origin: (origin, cb) => {
+    // allow server-to-server requests (no origin) and whitelisted origins
+    if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+    cb(new Error(`CORS: origin ${origin} not allowed`));
+  },
   methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
   allowedHeaders: ['Content-Type','Authorization'],
   credentials: true,
 }));
+app.options('*', cors());
 
 // Raw body for Paystack webhook
 app.use((req,_res,next) => {

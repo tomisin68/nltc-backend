@@ -47,7 +47,7 @@ router.get('/verify', requireAuth,
 // and redirect them to the frontend with the result.
 router.get('/callback', asyncHandler(async (req, res) => {
   const reference = req.query.reference;
-  const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+  const frontendUrl = process.env.FRONTEND_URL || 'https://nltc-online.vercel.app';
 
   if (!reference) {
     return res.redirect(`${frontendUrl}/payment/result?status=error&message=No+reference+returned`);
