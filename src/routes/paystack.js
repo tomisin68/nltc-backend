@@ -42,27 +42,102 @@ router.get('/verify', requireAuth,
   })
 );
 
+// ─── GET /api/paystack/callback ─────────────────────────────────────────────
+// Paystack redirects the user here after checkout. We verify the transaction
+// and redirect them to the frontend with the result.
+router.get('/callback', asyncHandler(async (req, res) => {
+  const reference = req.query.reference;
+  const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+
+  if (!reference) {
+    return res.redirect(`${frontendUrl}/payment/result?status=error&message=No+reference+returned`);
+  }
+
+  try {
+    const tx = await verifyTransaction(reference);
+
+    if (tx.status !== 'success') {
+      logger.warn('Payment not successful on callback', { reference, status: tx.status });
+      return res.redirect(`${frontendUrl}/payment/result?status=failed&reference=${reference}`);
+    }
+
+    const { uid, plan } = tx.metadata || {};
+
+    if (uid && plan) {
+      await upgradePlan(uid, plan, tx.reference);
+      logger.info('Plan upgraded via callback', { uid, plan });
+    }
+
+    return res.redirect(`${frontendUrl}/payment/result?status=success&plan=${plan || ''}&reference=${reference}`);
+  } catch (err) {
+    logger.error('Callback verification error', { reference, error: err.message });
+    return res.redirect(`${frontendUrl}/payment/result?status=error&message=Verification+failed`);
+  }
+}));
+
 router.post('/webhook', asyncHandler(async (req,res) => {
   if (!validateWebhookSignature(req.rawBody, req.headers['x-paystack-signature'])) {
     logger.warn('Invalid Paystack webhook signature');
     return res.status(401).json({error:'Invalid signature'});
   }
+
+  // Acknowledge immediately — Paystack expects 200 within 5 seconds
   res.status(200).json({received:true});
-  const event=req.body;
-  logger.info(`Paystack webhook: ${event.event}`);
+
+  const event = req.body;
+  logger.info(`Paystack webhook received: ${event.event}`);
+
   try {
-    if (event.event==='charge.success') {
-      const {metadata,reference}=event.data;
-      if (metadata?.uid && metadata?.plan) {
-        await upgradePlan(metadata.uid, metadata.plan, reference);
-        logger.info('Plan upgraded via webhook', {uid:metadata.uid, plan:metadata.plan});
+    switch (event.event) {
+
+      case 'charge.success': {
+        const { metadata, reference } = event.data;
+        if (metadata?.uid && metadata?.plan) {
+          await upgradePlan(metadata.uid, metadata.plan, reference);
+          logger.info('Plan upgraded via webhook (charge.success)', { uid: metadata.uid, plan: metadata.plan });
+        }
+        break;
       }
+
+      case 'subscription.create': {
+        const { metadata } = event.data || {};
+        if (metadata?.uid && metadata?.plan) {
+          await upgradePlan(metadata.uid, metadata.plan, event.data.subscription_code);
+          logger.info('Plan activated via webhook (subscription.create)', { uid: metadata.uid, plan: metadata.plan });
+        }
+        break;
+      }
+
+      case 'subscription.disable': {
+        const uid = event.data?.metadata?.uid || event.data?.customer?.metadata?.uid;
+        if (uid) {
+          await getDb().collection('users').doc(uid).update({
+            plan: 'free',
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+          logger.info('Plan downgraded via webhook (subscription.disable)', { uid });
+        }
+        break;
+      }
+
+      case 'invoice.payment_failed': {
+        const uid = event.data?.metadata?.uid || event.data?.customer?.metadata?.uid;
+        if (uid) {
+          await getDb().collection('users').doc(uid).update({
+            plan: 'free',
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+          logger.warn('Plan downgraded — invoice payment failed', { uid });
+        }
+        break;
+      }
+
+      default:
+        logger.info(`Unhandled Paystack event: ${event.event}`);
     }
-    if (event.event==='subscription.disable') {
-      const uid=event.data?.metadata?.uid;
-      if (uid) await getDb().collection('users').doc(uid).update({ plan:'free', updatedAt:admin.firestore.FieldValue.serverTimestamp() });
-    }
-  } catch(err) { logger.error('Webhook processing error', {error:err.message}); }
+  } catch (err) {
+    logger.error('Webhook processing error', { event: event.event, error: err.message });
+  }
 }));
 
 module.exports = router;

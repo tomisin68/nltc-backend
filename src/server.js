@@ -46,10 +46,11 @@ app.use('/api/health',       healthRouter);
 app.use('/api/gamification', gamificationRouter);
 app.use('/api/agora',        agoraRouter);
 app.use('/api/paystack',     paystackRouter);
+app.use('/payment',          paystackRouter); // serves /payment/callback redirect from Paystack
 
 app.use((req,res) => res.status(404).json({ error:`Route not found: ${req.method} ${req.path}` }));
 
-app.use((err,req,res,_next) => {
+app.use((err,_req,res,_next) => {
   logger.error('Unhandled error', { message:err.message });
   res.status(500).json({ error:'Internal server error', message: process.env.NODE_ENV==='development' ? err.message : undefined });
 });
