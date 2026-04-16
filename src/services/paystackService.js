@@ -6,7 +6,7 @@ const WEBHOOK_SECRET = process.env.PAYSTACK_WEBHOOK_SECRET;
 
 const PLANS = {
   pro:   { amount: parseInt(process.env.PLAN_PRO_AMOUNT   || '500000'), label: process.env.PLAN_PRO_LABEL   || 'Pro Scholar' },
-  elite: { amount: parseInt(process.env.PLAN_ELITE_AMOUNT || '1000000'), label: process.env.PLAN_ELITE_LABEL || 'Elite Bundle' },
+  elite: { amount: parseInt(process.env.PLAN_ELITE_AMOUNT || '1200000'), label: process.env.PLAN_ELITE_LABEL || 'Elite Bundle' },
 };
 
 const api = axios.create({
