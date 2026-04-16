@@ -6,10 +6,18 @@ const morgan     = require('morgan');
 const { initFirebase }                   = require('../config/firebase');
 const { generalLimiter }                 = require('./middleware/rateLimiter');
 const logger                             = require('./utils/logger');
-const healthRouter       = require('./routes/health');
-const gamificationRouter = require('./routes/gamification');
-const agoraRouter        = require('./routes/agora');
-const paystackRouter     = require('./routes/paystack');
+const healthRouter         = require('./routes/health');
+const gamificationRouter   = require('./routes/gamification');
+const agoraRouter          = require('./routes/agora');
+const paystackRouter       = require('./routes/paystack');
+const liveRouter           = require('./routes/live');
+const notificationsRouter  = require('./routes/notifications');
+const cbtRouter            = require('./routes/cbt');
+const adminRouter          = require('./routes/admin');
+const usersRouter          = require('./routes/users');
+const broadcastsRouter     = require('./routes/broadcasts');
+const videosRouter         = require('./routes/videos');
+const scheduleRouter       = require('./routes/schedule');
 
 initFirebase();
 
@@ -57,11 +65,19 @@ if (process.env.NODE_ENV !== 'test') {
 }
 
 app.use('/api/', generalLimiter);
-app.use('/api/health',       healthRouter);
-app.use('/api/gamification', gamificationRouter);
-app.use('/api/agora',        agoraRouter);
-app.use('/api/paystack',     paystackRouter);
-app.use('/payment',          paystackRouter); // serves /payment/callback redirect from Paystack
+app.use('/api/health',         healthRouter);
+app.use('/api/gamification',   gamificationRouter);
+app.use('/api/agora',          agoraRouter);
+app.use('/api/paystack',       paystackRouter);
+app.use('/payment',            paystackRouter);  // Paystack callback redirect
+app.use('/api/live',           liveRouter);
+app.use('/api/notifications',  notificationsRouter);
+app.use('/api/cbt',            cbtRouter);
+app.use('/api/admin',          adminRouter);
+app.use('/api/users',          usersRouter);
+app.use('/api/broadcasts',     broadcastsRouter);
+app.use('/api/videos',         videosRouter);
+app.use('/api/schedule',       scheduleRouter);
 
 app.use((req,res) => res.status(404).json({ error:`Route not found: ${req.method} ${req.path}` }));
 
