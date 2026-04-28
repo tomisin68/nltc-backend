@@ -16,11 +16,12 @@ const STREAK_BONUS = 50; // awarded on top of base XP when streak increments
 function computeBaseXP(action, meta = {}) {
   const score = Number(meta.score) || 0;
   switch (action) {
-    case 'watch_lesson': return 20;
-    case 'join_live':    return 30;
-    case 'first_login':  return 100;
+    case 'watch_lesson':  return 20;
+    case 'join_live':     return 30;
+    case 'first_login':   return 100;
+    case 'daily_streak':  return 0;   // streak bonus (+50) is added by streak logic
     // spec formula: Math.round(score * 0.5) + (score >= 70 ? 20 : 0), max 70 XP
-    case 'cbt_session':  return Math.round(score * 0.5) + (score >= 70 ? 20 : 0);
+    case 'cbt_session':   return Math.round(score * 0.5) + (score >= 70 ? 20 : 0);
     default: throw new Error(`Unknown action: ${action}`);
   }
 }
@@ -86,6 +87,18 @@ async function awardXP(uid, action, meta = {}) {
     let   streak = profile.streak || 0;
     let   streakBonusAwarded = false;
 
+    // daily_streak is idempotent — if already fired today (same day), return no XP
+    if (action === 'daily_streak' && last && isSameDay(last, now)) {
+      return {
+        newXP:              profile.xp || 0,
+        xpEarned:           0,
+        newStreak:          streak,
+        streakBonusAwarded: false,
+        leveledUp:          false,
+        ...xpToLevel(profile.xp || 0),
+      };
+    }
+
     if (action !== 'first_login') {
       if (!last) {
         streak = 1;
@@ -124,8 +137,8 @@ router.post(
   '/xp',
   [
     body('action')
-      .isIn(['watch_lesson', 'cbt_session', 'join_live', 'first_login'])
-      .withMessage('action must be one of: watch_lesson, cbt_session, join_live, first_login'),
+      .isIn(['watch_lesson', 'cbt_session', 'join_live', 'first_login', 'daily_streak'])
+      .withMessage('action must be one of: watch_lesson, cbt_session, join_live, first_login, daily_streak'),
     body('meta').optional().isObject().withMessage('meta must be an object'),
   ],
   validate,
