@@ -16,16 +16,28 @@ const api = axios.create({
 
 /**
  * @param {string} email
- * @param {string} planKey         - 'pro' | 'elite'
+ * @param {string|null} planKey    - 'pro' | 'elite' | null (for lesson_fee)
  * @param {string} uid             - Firebase UID
  * @param {string} callbackUrl
- * @param {number} amountKobo      - Amount in kobo (100 kobo = ₦1), resolved by the route from Firestore
+ * @param {number} amountKobo      - Amount in kobo (100 kobo = ₦1)
  * @param {string} [type]          - 'plan_upgrade' | 'lesson_fee'
+ * @param {string} [description]   - Human-readable label (class name for lesson_fee, plan label for upgrades)
  */
-async function initializePayment(email, planKey, uid, callbackUrl, amountKobo, type = 'plan_upgrade') {
+async function initializePayment(email, planKey, uid, callbackUrl, amountKobo, type = 'plan_upgrade', description = null) {
   if (!amountKobo || amountKobo <= 0) throw new Error('amountKobo must be a positive number');
 
-  const amountNaira = Math.round(amountKobo / 100); // stored in metadata for receipt display
+  const amountNaira  = Math.round(amountKobo / 100);
+  const displayLabel = description || PLAN_LABELS[planKey] || planKey || type;
+
+  const customFields = [
+    { display_name: 'Type', variable_name: 'type', value: type },
+  ];
+  if (planKey) {
+    customFields.unshift({ display_name: 'Plan', variable_name: 'plan', value: PLAN_LABELS[planKey] || planKey });
+  }
+  if (description) {
+    customFields.push({ display_name: 'Description', variable_name: 'description', value: description });
+  }
 
   const { data } = await api.post('/transaction/initialize', {
     email,
@@ -34,13 +46,11 @@ async function initializePayment(email, planKey, uid, callbackUrl, amountKobo, t
     callback_url: callbackUrl,
     metadata: {
       uid,
-      plan:   planKey,
+      plan:        planKey  || null,
       type,
-      amount: amountNaira,   // naira — used by PaymentResultPage receipt
-      custom_fields: [
-        { display_name: 'Plan',  variable_name: 'plan',  value: PLAN_LABELS[planKey] || planKey },
-        { display_name: 'Type',  variable_name: 'type',  value: type },
-      ],
+      amount:      amountNaira,   // naira — used by PaymentResultPage receipt
+      description: displayLabel,  // class name or plan label — stored in payment record
+      custom_fields: customFields,
     },
   });
 
