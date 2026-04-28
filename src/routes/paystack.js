@@ -15,30 +15,77 @@ async function upgradePlan(uid, plan, reference) {
 }
 
 router.post('/initialize', authLimiter, requireAuth,
-  [body('plan').isIn(['pro','elite']), body('callbackUrl').isURL()],
+  [
+    body('plan').isIn(['pro','elite']),
+    body('callbackUrl').isURL(),
+    body('type').optional().isIn(['plan_upgrade', 'lesson_fee']),
+    body('amount').optional().isInt({ min: 1 }),
+  ],
   validate,
-  asyncHandler(async (req,res) => {
-    const snap=await getDb().collection('users').doc(req.user.uid).get();
-    if (!snap.exists) return res.status(404).json({error:'User not found'});
-    const email=snap.data().email||req.user.email;
-    if (!email) return res.status(400).json({error:'No email on record'});
-    const result=await initializePayment(email, req.body.plan, req.user.uid, req.body.callbackUrl);
-    logger.info('Paystack checkout initialised', {uid:req.user.uid, plan:req.body.plan});
-    res.json({ success:true, ...result });
+  asyncHandler(async (req, res) => {
+    const db  = getDb();
+    const uid = req.user.uid;
+
+    const [userSnap, feesSnap] = await Promise.all([
+      db.collection('users').doc(uid).get(),
+      db.collection('settings').doc('fees').get(),
+    ]);
+
+    if (!userSnap.exists) return res.status(404).json({ error: 'User not found' });
+
+    const email = userSnap.data().email || req.user.email;
+    if (!email)  return res.status(400).json({ error: 'No email on record' });
+
+    const fees = feesSnap.exists ? feesSnap.data() : {};
+    const planAmounts = {
+      pro:   (fees.proMonthly   || 5000)  * 100,   // Paystack uses kobo
+      elite: (fees.eliteMonthly || 10000) * 100,
+    };
+
+    const paymentType = req.body.type || 'plan_upgrade';
+
+    // For lesson_fee payments the frontend can pass an explicit amount (in naira)
+    const amountKobo = paymentType === 'lesson_fee'
+      ? (req.body.amount || fees.lessonFeeDefault || 5000) * 100
+      : planAmounts[req.body.plan];
+
+    const result = await initializePayment(
+      email,
+      req.body.plan,
+      uid,
+      req.body.callbackUrl,
+      amountKobo,
+      paymentType,
+    );
+
+    logger.info('Paystack checkout initialised', { uid, plan: req.body.plan, type: paymentType, amountKobo });
+    res.json({ success: true, ...result });
   })
 );
 
 router.get('/verify', requireAuth,
   [query('reference').notEmpty()],
   validate,
-  asyncHandler(async (req,res) => {
-    const tx=await verifyTransaction(req.query.reference);
-    if (tx.status!=='success') return res.status(402).json({error:`Payment not successful: ${tx.status}`});
-    const uid=tx.metadata?.uid, plan=tx.metadata?.plan;
-    if (uid!==req.user.uid) return res.status(403).json({error:'Transaction does not belong to this account'});
+  asyncHandler(async (req, res) => {
+    const tx = await verifyTransaction(req.query.reference);
+    if (tx.status !== 'success') {
+      return res.status(402).json({ error: `Payment not successful: ${tx.status}` });
+    }
+
+    const { uid, plan, type, amount } = tx.metadata || {};
+
+    if (uid !== req.user.uid) {
+      return res.status(403).json({ error: 'Transaction does not belong to this account' });
+    }
+
+    if (type === 'lesson_fee') {
+      logger.info('Lesson fee verified', { uid, amount });
+      return res.json({ success: true, type: 'lesson_fee', amount, message: 'Lesson fee payment confirmed.' });
+    }
+
     await upgradePlan(uid, plan, tx.reference);
-    logger.info('Plan upgraded via verify', {uid, plan});
-    res.json({ success:true, plan, message:`🎉 Welcome to ${plan}! Your plan is now active.` });
+    logger.info('Plan upgraded via verify', { uid, plan });
+    res.json({ success: true, plan, type: 'plan_upgrade', message: `🎉 Welcome to ${plan}! Your plan is now active.` });
   })
 );
 
@@ -61,14 +108,20 @@ router.get('/callback', asyncHandler(async (req, res) => {
       return res.redirect(`${frontendUrl}/payment/result?status=failed&reference=${reference}`);
     }
 
-    const { uid, plan } = tx.metadata || {};
+    const { uid, plan, type, amount } = tx.metadata || {};
 
-    if (uid && plan) {
+    if (uid && plan && type !== 'lesson_fee') {
       await upgradePlan(uid, plan, tx.reference);
       logger.info('Plan upgraded via callback', { uid, plan });
     }
 
-    return res.redirect(`${frontendUrl}/payment/result?status=success&plan=${plan || ''}&reference=${reference}`);
+    const params = new URLSearchParams({ status: 'success', reference });
+    if (plan)   params.set('plan', plan);
+    if (type)   params.set('type', type);
+    // amount stored in metadata is in naira (not kobo) for the receipt display
+    if (amount) params.set('amount', amount);
+
+    return res.redirect(`${frontendUrl}/payment/result?${params.toString()}`);
   } catch (err) {
     logger.error('Callback verification error', { reference, error: err.message });
     return res.redirect(`${frontendUrl}/payment/result?status=error&message=Verification+failed`);
@@ -92,7 +145,7 @@ router.post('/webhook', asyncHandler(async (req,res) => {
 
       case 'charge.success': {
         const { metadata, reference } = event.data;
-        if (metadata?.uid && metadata?.plan) {
+        if (metadata?.uid && metadata?.plan && metadata?.type !== 'lesson_fee') {
           await upgradePlan(metadata.uid, metadata.plan, reference);
           logger.info('Plan upgraded via webhook (charge.success)', { uid: metadata.uid, plan: metadata.plan });
         }

@@ -179,7 +179,7 @@ router.post('/end-session', asyncHandler(async (req, res) => {
     filter:    'all',
     title,
     body,
-    type:      'live_class_start',
+    type:      'session_ended',
     iconEmoji: '📡',
     data:      notifData,
   }).catch(e => logger.error('end-session in-app notif failed', { err: e.message }));

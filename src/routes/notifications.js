@@ -18,13 +18,28 @@ router.post('/register-token', requireAuth, asyncHandler(async (req, res) => {
     return res.status(400).json({ error: 'fcmToken is required' });
   }
 
-  await getDb().collection('users').doc(req.user.uid).update({
+  const db       = getDb();
+  const userRef  = db.collection('users').doc(req.user.uid);
+  const userSnap = await userRef.get();
+  const existingTokens = userSnap.exists ? (userSnap.data().fcmTokens || []) : [];
+  const isFirstToken   = existingTokens.length === 0;
+
+  await userRef.update({
     fcmTokens:      admin.firestore.FieldValue.arrayUnion(fcmToken),
     fcmPlatform:    platform || 'web',
     tokenUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
   });
 
-  logger.info('FCM token registered', { uid: req.user.uid, platform });
+  // Send the welcome push the first time this user registers a device
+  if (isFirstToken) {
+    sendPushToTokens([fcmToken], {
+      title: 'Welcome to Next Level TC! 🎓',
+      body:  'Your journey to exam success starts now. Stay consistent!',
+      data:  { type: 'welcome', url: '/student.html' },
+    }).catch(e => logger.error('Welcome push failed', { uid: req.user.uid, err: e.message }));
+  }
+
+  logger.info('FCM token registered', { uid: req.user.uid, platform, isFirstToken });
   res.json({ success: true });
 }));
 
@@ -40,9 +55,20 @@ router.post('/send', requireAdmin, asyncHandler(async (req, res) => {
 
   if (target?.startsWith('uid:')) {
     // Single user
-    const uid  = target.split(':')[1];
-    const snap = await db.collection('users').doc(uid).get();
-    tokens = snap.data()?.fcmTokens || [];
+    const uid      = target.split(':')[1];
+    const userSnap = await db.collection('users').doc(uid).get();
+    tokens = userSnap.data()?.fcmTokens || [];
+
+    // Write in-app notification for the targeted user
+    db.collection('users').doc(uid).collection('notifications').add({
+      title,
+      body,
+      type:      data?.type || 'announcement',
+      data:      data || {},
+      iconEmoji: '📢',
+      read:      false,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    }).catch(e => logger.error('uid-targeted in-app notif failed', { err: e.message }));
   } else {
     // Segment query
     let q = db.collection('users');

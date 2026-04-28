@@ -6,20 +6,26 @@ const asyncHandler   = require('../utils/asyncHandler');
 const logger         = require('../utils/logger');
 const { getDb }      = require('../../config/firebase');
 const admin          = require('firebase-admin');
-const router         = express.Router();
 
+const router = express.Router();
 router.use(requireAuth);
 
-// ─── XP reward table ───────────────────────────────────────────────────────
-const XP = {
-  watch_lesson:  15,
-  complete_cbt:  30,
-  join_live:     50,
-  daily_streak:  10,
-  score_90_plus: 20,
-};
+// ─── XP spec (matches documentation exactly) ────────────────────────────────
+const STREAK_BONUS = 50; // awarded on top of base XP when streak increments
 
-// ─── Helpers ────────────────────────────────────────────────────────────────
+function computeBaseXP(action, meta = {}) {
+  const score = Number(meta.score) || 0;
+  switch (action) {
+    case 'watch_lesson': return 20;
+    case 'join_live':    return 30;
+    case 'first_login':  return 100;
+    // spec formula: Math.round(score * 0.5) + (score >= 70 ? 20 : 0), max 70 XP
+    case 'cbt_session':  return Math.round(score * 0.5) + (score >= 70 ? 20 : 0);
+    default: throw new Error(`Unknown action: ${action}`);
+  }
+}
+
+// ─── Level thresholds ────────────────────────────────────────────────────────
 function xpToLevel(xp) {
   const thresholds = [0, 500, 1500, 3500, 7000, 12000, 20000];
   let level = 1;
@@ -27,9 +33,11 @@ function xpToLevel(xp) {
     if (xp >= thresholds[i]) level = i + 1;
   }
   level = Math.min(level, thresholds.length);
-  const nextLevelXP = thresholds[level] ?? thresholds[thresholds.length - 1];
-  const prevLevelXP = thresholds[level - 1] ?? 0;
-  return { level, nextLevelXP, prevLevelXP };
+  return {
+    level,
+    nextLevelXP: thresholds[level]     ?? thresholds[thresholds.length - 1],
+    prevLevelXP: thresholds[level - 1] ?? 0,
+  };
 }
 
 function isSameDay(a, b) {
@@ -41,99 +49,84 @@ function isSameDay(a, b) {
 }
 
 function isYesterday(d) {
-  const yesterday = new Date();
-  yesterday.setDate(yesterday.getDate() - 1);
-  return isSameDay(d, yesterday);
+  const y = new Date();
+  y.setDate(y.getDate() - 1);
+  return isSameDay(d, y);
 }
 
-// ─── Core XP award function ─────────────────────────────────────────────────
-// FIX 1: guard against unknown actions returning 0 XP silently
-// FIX 2: streak bonus only awarded when streak actually increments
-// FIX 3: returns full level info so frontend can show level-up toasts
+// ─── Core award function (Firestore transaction) ─────────────────────────────
 async function awardXP(uid, action, meta = {}) {
   const db      = getDb();
   const userRef = db.collection('users').doc(uid);
 
-  // Use a transaction so concurrent requests don't corrupt XP / streak
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(userRef);
     if (!snap.exists) throw new Error('User not found');
 
-    const profile   = snap.data();
-    const baseXP    = XP[action];
+    const profile = snap.data();
 
-    // FIX 1: reject unknown actions explicitly
-    if (baseXP === undefined) throw new Error(`Unknown action: ${action}`);
-
-    let xpEarned = baseXP;
-
-    // Bonus for scoring 90%+ on CBT
-    if (action === 'complete_cbt' && Number(meta.score) >= 90) {
-      xpEarned += XP.score_90_plus;
+    // first_login is once-ever — idempotent
+    if (action === 'first_login' && profile.firstLoginXpAwarded) {
+      return {
+        newXP:              profile.xp || 0,
+        xpEarned:           0,
+        newStreak:          profile.streak || 0,
+        streakBonusAwarded: false,
+        alreadyAwarded:     true,
+        leveledUp:          false,
+        ...xpToLevel(profile.xp || 0),
+      };
     }
 
-    // ── Streak calculation ────────────────────────────────────────────
-    const lastRaw   = profile.lastActivityAt;
-    const last      = lastRaw?.toDate?.() ?? null;
-    const now       = new Date();
-    let   streak    = profile.streak || 0;
+    let xpEarned = computeBaseXP(action, meta);
+
+    // ── Streak (not applied to first_login) ──────────────────────────
+    const last   = profile.lastActivityAt?.toDate?.() ?? null;
+    const now    = new Date();
+    let   streak = profile.streak || 0;
     let   streakBonusAwarded = false;
 
-    if (last) {
-      if (isSameDay(last, now)) {
-        // Same day — streak unchanged, no bonus
+    if (action !== 'first_login') {
+      if (!last) {
+        streak = 1;
+      } else if (isSameDay(last, now)) {
+        // same day — no streak change, no bonus
       } else if (isYesterday(last)) {
-        // Consecutive day — increment streak and award bonus
         streak++;
-        xpEarned += XP.daily_streak;   // FIX 2: bonus only on increment
+        xpEarned          += STREAK_BONUS;
         streakBonusAwarded = true;
       } else {
-        // Gap — reset streak to 1, no bonus
-        streak = 1;
+        streak = 1; // gap — reset
       }
-    } else {
-      // First ever activity
-      streak = 1;
     }
 
-    const oldXP    = profile.xp || 0;
-    const newXP    = oldXP + xpEarned;
-    const oldLevel = xpToLevel(oldXP).level;
-    const { level, nextLevelXP, prevLevelXP } = xpToLevel(newXP);
-    const leveledUp = level > oldLevel;
+    const oldXP     = profile.xp || 0;
+    const newXP     = oldXP + xpEarned;
+    const oldLevel  = xpToLevel(oldXP).level;
+    const levelInfo = xpToLevel(newXP);
+    const leveledUp = levelInfo.level > oldLevel;
 
-    tx.update(userRef, {
-      xp:              newXP,
+    const updates = {
+      xp:             newXP,
       streak,
-      lastActivityAt:  admin.firestore.FieldValue.serverTimestamp(),
-    });
-
-    return {
-      newXP,
-      xpEarned,
-      newStreak:          streak,
-      streakBonusAwarded,
-      level,
-      nextLevelXP,
-      prevLevelXP,
-      leveledUp,
+      lastActivityAt: admin.firestore.FieldValue.serverTimestamp(),
     };
+    if (action === 'first_login') updates.firstLoginXpAwarded = true;
+
+    tx.update(userRef, updates);
+
+    return { newXP, xpEarned, newStreak: streak, streakBonusAwarded, leveledUp, ...levelInfo };
   });
 }
 
-// ─── POST /gamification/xp ──────────────────────────────────────────────────
-// Called by frontend for: watch_lesson, join_live, daily_streak
-// FIX 3: added 'join_live' to the allowed list (it was missing before)
+// ─── POST /gamification/xp ───────────────────────────────────────────────────
 router.post(
   '/xp',
   [
     body('action')
-      .isIn(['watch_lesson', 'complete_cbt', 'join_live', 'daily_streak'])
-      .withMessage('Invalid action'),
-    body('meta')
-      .optional()
-      .isObject()
-      .withMessage('meta must be an object'),
+      .isIn(['watch_lesson', 'cbt_session', 'join_live', 'first_login'])
+      .withMessage('action must be one of: watch_lesson, cbt_session, join_live, first_login'),
+    body('meta').optional().isObject().withMessage('meta must be an object'),
   ],
   validate,
   asyncHandler(async (req, res) => {
@@ -145,13 +138,11 @@ router.post(
       newXP:    result.newXP,
     });
     res.json({ success: true, ...result });
-  })
+  }),
 );
 
 // ─── POST /gamification/cbt-session ─────────────────────────────────────────
-// Saves session to Firestore AND awards XP in one call.
-// FIX 4: also writes to users/{uid}/results (subcollection) so the
-//         dashboard CBT history table actually populates.
+// Saves session to Firestore AND awards XP using the spec formula.
 router.post(
   '/cbt-session',
   [
@@ -164,32 +155,28 @@ router.post(
   ],
   validate,
   asyncHandler(async (req, res) => {
-    const db   = getDb();
-    const uid  = req.user.uid;
-    const now  = admin.firestore.FieldValue.serverTimestamp();
+    const db  = getDb();
+    const uid = req.user.uid;
+    const now = admin.firestore.FieldValue.serverTimestamp();
 
     const sessionData = {
       userId:      uid,
       subject:     req.body.subject,
-      exam:        req.body.exam    || 'JAMB / UTME',
+      exam:        req.body.exam  || 'JAMB / UTME',
       score:       req.body.score,
       correct:     req.body.correct,
       total:       req.body.total,
-      topic:       req.body.topic   || null,
-      submittedAt: now,              // FIX 4: use submittedAt so dashboard query works
+      topic:       req.body.topic || null,
+      submittedAt: now,
     };
 
-    // Write to top-level cbtSessions collection (analytics / admin use)
-    const sessRef = db.collection('cbtSessions').doc();
-    await sessRef.set(sessionData);
-
-    // FIX 4: ALSO write to users/{uid}/results so the student's history
-    // tab can query collection('users', uid, 'results') as the frontend does.
+    // Write to top-level (admin analytics) AND user subcollection (dashboard history)
+    const sessRef   = db.collection('cbtSessions').doc();
     const resultRef = db.collection('users').doc(uid).collection('results').doc(sessRef.id);
-    await resultRef.set(sessionData);
+    await Promise.all([sessRef.set(sessionData), resultRef.set(sessionData)]);
 
-    // Award XP
-    const result = await awardXP(uid, 'complete_cbt', { score: req.body.score });
+    // XP via spec formula — cbt_session uses score-based compute
+    const result = await awardXP(uid, 'cbt_session', { score: req.body.score });
 
     logger.info('CBT session saved', {
       uid,
@@ -197,19 +184,11 @@ router.post(
       score:     req.body.score,
       xpEarned:  result.xpEarned,
     });
-
-    res.status(201).json({
-      success:   true,
-      sessionId: sessRef.id,
-      ...result,
-    });
-  })
+    res.status(201).json({ success: true, sessionId: sessRef.id, ...result });
+  }),
 );
 
 // ─── GET /gamification/leaderboard ──────────────────────────────────────────
-// FIX 5: removed the where('role','==','student') filter that required a
-//         composite index and caused silent failures when the index was absent.
-//         Students are now filtered in-memory, which is safe for ≤50 docs.
 router.get(
   '/leaderboard',
   [
@@ -220,65 +199,60 @@ router.get(
   ],
   validate,
   asyncHandler(async (req, res) => {
-    const db    = getDb();
-    const lim   = parseInt(req.query.limit || '20', 10);
+    const db  = getDb();
+    const lim = parseInt(req.query.limit || '20', 10);
 
-    // FIX 5: single-field orderBy — no composite index needed
-    const snap  = await db.collection('users').orderBy('xp', 'desc').limit(lim).get();
+    const snap = await db.collection('users').orderBy('xp', 'desc').limit(lim).get();
 
     const board = snap.docs
       .map((d, i) => ({
-        rank:      i + 1,
-        uid:       d.id,
-        firstName: d.data().firstName  || '',
-        lastName:  d.data().lastName   || '',
-        state:     d.data().state      || '—',
-        targetExam:d.data().targetExam || '—',
-        xp:        d.data().xp         || 0,
-        streak:    d.data().streak      || 0,
-        plan:      d.data().plan        || 'free',
+        rank:       i + 1,
+        uid:        d.id,
+        firstName:  d.data().firstName  || '',
+        lastName:   d.data().lastName   || '',
+        state:      d.data().state      || '—',
+        targetExam: d.data().targetExam || '—',
+        xp:         d.data().xp         || 0,
+        streak:     d.data().streak     || 0,
+        plan:       d.data().plan       || 'free',
       }))
-      // FIX 5: filter in-memory instead of in the query
-      .filter(u => !u.role || u.role !== 'admin');
+      .filter(u => u.role !== 'admin' && u.role !== 'super_admin');
 
     const myEntry = board.find(s => s.uid === req.user.uid);
-    const myRank  = myEntry ? myEntry.rank : null;
 
-    res.json({ success: true, leaderboard: board, myRank });
-  })
+    res.json({ success: true, leaderboard: board, myRank: myEntry?.rank ?? null });
+  }),
 );
 
 // ─── GET /gamification/rank ──────────────────────────────────────────────────
-// FIX 6: original used where('xp','>',myXP) which requires an index on xp.
-//         Replaced with a count query that works without any extra index.
 router.get(
   '/rank',
   asyncHandler(async (req, res) => {
-    const db   = getDb();
-    const snap = await db.collection('users').doc(req.user.uid).get();
+    const db = getDb();
 
-    if (!snap.exists) {
-      return res.status(404).json({ error: 'User not found' });
-    }
+    const userSnap = await db.collection('users').doc(req.user.uid).get();
+    if (!userSnap.exists) return res.status(404).json({ error: 'User not found' });
 
-    const myXP = snap.data().xp || 0;
+    const myXP   = userSnap.data().xp    || 0;
+    const streak = userSnap.data().streak || 0;
 
-    // FIX 6: this query only needs the default single-field index on xp
-    const aboveSnap = await db
-      .collection('users')
-      .where('xp', '>', myXP)
-      .count()          // uses Firestore aggregation — no composite index
-      .get();
+    const [aboveSnap, totalSnap] = await Promise.all([
+      db.collection('users').where('xp', '>', myXP).count().get(),
+      db.collection('users').where('role', '==', 'student').count().get(),
+    ]);
 
-    const rank = aboveSnap.data().count + 1;
+    const rank          = aboveSnap.data().count + 1;
+    const totalStudents = totalSnap.data().count;
 
     res.json({
       success: true,
       rank,
       xp: myXP,
+      streak,
+      totalStudents,
       ...xpToLevel(myXP),
     });
-  })
+  }),
 );
 
 module.exports = router;

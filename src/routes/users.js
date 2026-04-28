@@ -4,7 +4,7 @@ const { requireAuth }          = require('../middleware/auth');
 const asyncHandler             = require('../utils/asyncHandler');
 const logger                   = require('../utils/logger');
 const { getDb }                = require('../../config/firebase');
-const { sendInAppNotification } = require('../services/notificationService');
+const { sendInAppNotification, sendPushToTokens } = require('../services/notificationService');
 
 const router = express.Router();
 
@@ -61,7 +61,17 @@ router.post('/on-signup', requireAuth, asyncHandler(async (req, res) => {
     data:      { url: '/student.html' },
   });
 
-  // 3. Alert all admins of the new signup
+  // 3. Welcome FCM push (fire-and-forget — tokens may be registered moments after signup)
+  const fcmTokens = req.body.fcmTokens || req.userData?.fcmTokens || [];
+  if (fcmTokens.length) {
+    sendPushToTokens(fcmTokens, {
+      title: 'Welcome to Next Level TC! 🎓',
+      body:  'Your journey to exam success starts now.',
+      data:  { type: 'welcome', url: '/student.html' },
+    }).catch(e => logger.error('Welcome push failed', { uid, err: e.message }));
+  }
+
+  // 4. Alert all admins of the new signup
   const adminsSnap = await db
     .collection('users')
     .where('role', 'in', ['admin', 'super_admin'])
