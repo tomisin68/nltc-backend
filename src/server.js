@@ -29,8 +29,11 @@ app.use(helmet());
 
 const ALLOWED_ORIGINS = [
   'https://nltc-online.vercel.app',   // production frontend
-  'http://localhost:3000',             // local dev
+  'http://localhost:3000',             // local dev (CRA / other)
   'http://localhost:4000',
+  'http://localhost:5173',             // Vite dev server
+  'http://localhost:5174',             // Vite dev server (alt port)
+  'http://127.0.0.1:5173',
   'http://127.0.0.1:5500',            // VS Code Live Server
   // any extra origins from env (comma-separated)
   ...( process.env.EXTRA_ORIGINS ? process.env.EXTRA_ORIGINS.split(',').map(o=>o.trim()) : [] ),
