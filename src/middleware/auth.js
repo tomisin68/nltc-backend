@@ -1,10 +1,5 @@
 const { getAuth, getDb } = require('../../config/firebase');
 
-/**
- * Verifies the Firebase ID token and loads the user's Firestore document.
- * Sets req.user  = decoded token claims
- *     req.userData = Firestore user document data (or {} if not found)
- */
 async function requireAuth(req, res, next) {
   const header = req.headers.authorization;
   if (!header || !header.startsWith('Bearer ')) {
@@ -13,19 +8,27 @@ async function requireAuth(req, res, next) {
   try {
     const token = header.split('Bearer ')[1];
     req.user = await getAuth().verifyIdToken(token);
-    const snap = await getDb().collection('users').doc(req.user.uid).get();
-    req.userData = snap.exists ? snap.data() : {};
+    req.userData = {};
     next();
   } catch {
     return res.status(401).json({ error: 'Invalid or expired token' });
   }
 }
 
-/**
- * Requires role === 'admin' or 'super_admin' (checked against Firestore user doc).
- */
+// Loads req.userData from Firestore — only called by requireAdmin/requireSuperAdmin.
+async function loadUserData(req) {
+  if (req.userData && req.userData._loaded) return;
+  const snap = await getDb().collection('users').doc(req.user.uid).get();
+  req.userData = snap.exists ? { ...snap.data(), _loaded: true } : { _loaded: true };
+}
+
 async function requireAdmin(req, res, next) {
   await requireAuth(req, res, async () => {
+    try {
+      await loadUserData(req);
+    } catch {
+      return res.status(401).json({ error: 'Invalid or expired token' });
+    }
     const role = req.userData?.role;
     if (role !== 'admin' && role !== 'super_admin') {
       return res.status(403).json({ error: 'Admin access required' });
@@ -34,11 +37,13 @@ async function requireAdmin(req, res, next) {
   });
 }
 
-/**
- * Requires role === 'super_admin' only.
- */
 async function requireSuperAdmin(req, res, next) {
   await requireAuth(req, res, async () => {
+    try {
+      await loadUserData(req);
+    } catch {
+      return res.status(401).json({ error: 'Invalid or expired token' });
+    }
     const role = req.userData?.role;
     if (role !== 'super_admin') {
       return res.status(403).json({ error: 'Super admin access required' });
