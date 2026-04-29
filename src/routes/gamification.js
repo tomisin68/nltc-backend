@@ -229,9 +229,9 @@ router.get(
     const snap = await db.collection('users').orderBy('xp', 'desc').limit(lim).get();
 
     const board = snap.docs
-      .map((d, i) => ({
-        rank:       i + 1,
+      .map(d => ({
         uid:        d.id,
+        role:       d.data().role       || 'student',
         firstName:  d.data().firstName  || '',
         lastName:   d.data().lastName   || '',
         state:      d.data().state      || '—',
@@ -240,7 +240,8 @@ router.get(
         streak:     d.data().streak     || 0,
         plan:       d.data().plan       || 'free',
       }))
-      .filter(u => u.role !== 'admin' && u.role !== 'super_admin');
+      .filter(u => u.role !== 'admin' && u.role !== 'super_admin')
+      .map((u, i) => ({ ...u, rank: i + 1 })); // re-rank after admins removed
 
     leaderboardCache.set(lim, { board, cachedAt: now });
 
@@ -262,7 +263,7 @@ router.get(
     const streak = userSnap.data().streak || 0;
 
     const [aboveSnap, totalSnap] = await Promise.all([
-      db.collection('users').where('xp', '>', myXP).count().get(),
+      db.collection('users').where('role', '==', 'student').where('xp', '>', myXP).count().get(),
       db.collection('users').where('role', '==', 'student').count().get(),
     ]);
 
