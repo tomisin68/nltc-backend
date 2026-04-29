@@ -201,6 +201,10 @@ router.post(
   }),
 );
 
+// ─── Leaderboard cache (60 s TTL) ───────────────────────────────────────────
+const leaderboardCache = new Map(); // key: lim → { board, cachedAt }
+const LEADERBOARD_TTL  = 60_000;
+
 // ─── GET /gamification/leaderboard ──────────────────────────────────────────
 router.get(
   '/leaderboard',
@@ -214,6 +218,13 @@ router.get(
   asyncHandler(async (req, res) => {
     const db  = getDb();
     const lim = parseInt(req.query.limit || '20', 10);
+    const now = Date.now();
+
+    const cached = leaderboardCache.get(lim);
+    if (cached && now - cached.cachedAt < LEADERBOARD_TTL) {
+      const myEntry = cached.board.find(s => s.uid === req.user.uid);
+      return res.json({ success: true, leaderboard: cached.board, myRank: myEntry?.rank ?? null });
+    }
 
     const snap = await db.collection('users').orderBy('xp', 'desc').limit(lim).get();
 
@@ -231,8 +242,9 @@ router.get(
       }))
       .filter(u => u.role !== 'admin' && u.role !== 'super_admin');
 
-    const myEntry = board.find(s => s.uid === req.user.uid);
+    leaderboardCache.set(lim, { board, cachedAt: now });
 
+    const myEntry = board.find(s => s.uid === req.user.uid);
     res.json({ success: true, leaderboard: board, myRank: myEntry?.rank ?? null });
   }),
 );
