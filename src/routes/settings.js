@@ -12,15 +12,29 @@ const DEFAULTS = {
   lessonFeeDefault:  5000,
 };
 
+// In-memory cache — avoids a Firestore read on every page load.
+let feesCache = null;
+let feesCachedAt = 0;
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
 // ─── GET /api/settings/fees (public) ────────────────────────────────────────
-// Used by the frontend useFees hook to know current plan prices.
 router.get('/fees', asyncHandler(async (req, res) => {
-  const snap = await getDb().collection('settings').doc('fees').get();
-  res.json(snap.exists ? snap.data() : DEFAULTS);
+  const now = Date.now();
+  if (feesCache && now - feesCachedAt < CACHE_TTL_MS) {
+    return res.json(feesCache);
+  }
+  try {
+    const snap = await getDb().collection('settings').doc('fees').get();
+    feesCache   = snap.exists ? snap.data() : DEFAULTS;
+    feesCachedAt = now;
+    res.json(feesCache);
+  } catch {
+    // Firestore unavailable (quota, network) — return cached or defaults
+    res.json(feesCache || DEFAULTS);
+  }
 }));
 
 // ─── POST /api/settings/fees (admin only) ────────────────────────────────────
-// Allows admins to update fee amounts without a code deploy.
 router.post('/fees', requireAdmin, asyncHandler(async (req, res) => {
   const { proMonthly, eliteMonthly, lessonFeeDefault } = req.body;
 
@@ -40,6 +54,9 @@ router.post('/fees', requireAdmin, asyncHandler(async (req, res) => {
   }
 
   await getDb().collection('settings').doc('fees').set(updates, { merge: true });
+
+  // Bust the cache so the next GET returns fresh data
+  feesCache = null;
 
   logger.info('Fee settings updated', { updates, by: req.user.uid });
   res.json({ success: true, fees: updates });
