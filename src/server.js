@@ -27,19 +27,39 @@ const PORT = process.env.PORT || 3001;
 
 app.use(helmet());
 
-const ALLOWED_ORIGINS = [
-  'https://nltc-online.vercel.app',   // production frontend
+function normalizeOrigin(value) {
+  if (!value) return null;
+
+  try {
+    return new URL(value.trim()).origin;
+  } catch (_) {
+    return value.trim().replace(/\/+$/, '');
+  }
+}
+
+function parseOriginList(value) {
+  return (value || '')
+    .split(',')
+    .map(normalizeOrigin)
+    .filter(Boolean);
+}
+
+const ALLOWED_ORIGINS = Array.from(new Set([
+  'https://nltc-online.vercel.app',    // legacy production frontend
+  'https://nltc.com.ng',               // current production frontend
+  'https://www.nltc.com.ng',
   'http://localhost:3000',             // local dev (CRA / other)
   'http://localhost:4000',
   'http://localhost:5173',             // Vite dev server
   'http://localhost:5174',             // Vite dev server (alt port)
   'http://127.0.0.1:5173',
-  'http://127.0.0.1:5500',            // VS Code Live Server
-  // any extra origins from env (comma-separated)
-  ...( process.env.EXTRA_ORIGINS ? process.env.EXTRA_ORIGINS.split(',').map(o=>o.trim()) : [] ),
-];
+  'http://127.0.0.1:5500',             // VS Code Live Server
+  normalizeOrigin(process.env.FRONTEND_URL),
+  ...parseOriginList(process.env.ALLOWED_ORIGINS),
+  ...parseOriginList(process.env.EXTRA_ORIGINS),
+].filter(Boolean)));
 
-app.use(cors({
+const corsOptions = {
   origin: (origin, cb) => {
     // allow server-to-server requests (no origin) and whitelisted origins
     if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
@@ -48,8 +68,10 @@ app.use(cors({
   methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
   allowedHeaders: ['Content-Type','Authorization'],
   credentials: true,
-}));
-app.options('*', cors());
+};
+
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 
 // Raw body for Paystack webhook
 app.use((req,_res,next) => {
