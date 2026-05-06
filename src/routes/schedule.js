@@ -25,11 +25,13 @@ router.post('/send-reminders', asyncHandler(async (req, res) => {
   const db  = getDb();
   const now = Date.now();
 
-  // Fetch classes scheduled within the next 25 hours (wide window to catch both buckets)
-  const windowEnd = new Date(now + 25 * 60 * 60 * 1000);
+  // Fetch classes within a window: 10 min ago → 25 hours ahead
+  // The 10-min lookback lets us catch "starting now" even if cron ran slightly late
+  const windowStart = new Date(now - 10 * 60 * 1000);
+  const windowEnd   = new Date(now + 25 * 60 * 60 * 1000);
   const snap = await db
     .collection('schedule')
-    .where('scheduledAt', '>', new Date(now))
+    .where('scheduledAt', '>', windowStart)
     .where('scheduledAt', '<', windowEnd)
     .get();
 
@@ -94,6 +96,32 @@ router.post('/send-reminders', asyncHandler(async (req, res) => {
       sent++;
       logger.info('1h reminder sent', { classId: doc.id, title: cls.title });
     }
+
+    // ── "Starting now" reminder (±10 min window) ──────────────────
+    const isNow = diff >= -10 * 60000 && diff <= 10 * 60000;
+    if (isNow && !cls.reminderNowSent) {
+      const title = `🚀 Class Starting Now: ${cls.title}`;
+      const body  = cls.subject
+        ? `Your ${cls.subject} class is live! Join now.`
+        : `"${cls.title}" is starting! Join now.`;
+
+      await broadcastInAppNotification({
+        filter:    'all',
+        title, body,
+        type:      'class_reminder',
+        iconEmoji: '📅',
+        data:      { url: '/student.html#schedule' },
+      });
+
+      if (allTokens.length) {
+        sendPushToTokens(allTokens, { title, body, data: { type: 'class_reminder', url: '/student.html#schedule' } })
+          .catch(e => logger.error('now-reminder push failed', { err: e.message }));
+      }
+
+      await doc.ref.update({ reminderNowSent: true });
+      sent++;
+      logger.info('now-reminder sent', { classId: doc.id, title: cls.title });
+    }
   }
 
   logger.info('Cron: send-reminders complete', { checked: snap.size, sent });
@@ -126,6 +154,7 @@ router.post('/create', requireAdmin, asyncHandler(async (req, res) => {
     createdAt:        admin.firestore.FieldValue.serverTimestamp(),
     reminder24hSent:  false,
     reminder1hSent:   false,
+    reminderNowSent:  false,
   });
 
   logger.info('Class scheduled', { classId: classRef.id, title, scheduledAt });
