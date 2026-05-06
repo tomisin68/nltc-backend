@@ -109,9 +109,8 @@ app.use('/api/settings',      settingsRouter);
 app.use((req,res) => res.status(404).json({ error:`Route not found: ${req.method} ${req.path}` }));
 
 app.use((err,_req,res,_next) => {
-  logger.error('Unhandled error', { message:err.message, code:err.code, stack:err.stack?.split('\n')[0] });
-  // Temporarily exposing error details to diagnose production 500s — will be reverted
-  res.status(500).json({ error:'Internal server error', message: err.message, code: err.code });
+  logger.error('Unhandled error', { message:err.message, code:err.code });
+  res.status(500).json({ error:'Internal server error', message: process.env.NODE_ENV==='development' ? err.message : undefined });
 });
 
 app.listen(PORT, () => {

@@ -262,13 +262,18 @@ router.get(
     const myXP   = userSnap.data().xp    || 0;
     const streak = userSnap.data().streak || 0;
 
-    const [aboveSnap, totalSnap] = await Promise.all([
-      db.collection('users').where('role', '==', 'student').where('xp', '>', myXP).count().get(),
-      db.collection('users').where('role', '==', 'student').count().get(),
-    ]);
-
-    const rank          = aboveSnap.data().count + 1;
-    const totalStudents = totalSnap.data().count;
+    let rank = null, totalStudents = null;
+    try {
+      // Requires composite index: users(role ASC, xp ASC) — see firestore.indexes.json
+      const [aboveSnap, totalSnap] = await Promise.all([
+        db.collection('users').where('role', '==', 'student').where('xp', '>', myXP).count().get(),
+        db.collection('users').where('role', '==', 'student').count().get(),
+      ]);
+      rank          = aboveSnap.data().count + 1;
+      totalStudents = totalSnap.data().count;
+    } catch {
+      // Index may still be building — return null rank rather than 500
+    }
 
     res.json({
       success: true,
