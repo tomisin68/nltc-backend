@@ -11,36 +11,57 @@ const admin          = require('firebase-admin');
 const router         = express.Router();
 
 async function upgradePlan(uid, plan, reference) {
+  const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // exactly 30 days
   await getDb().collection('users').doc(uid).update({
     plan,
     paystackRef:        reference,
     planActivatedAt:    admin.firestore.FieldValue.serverTimestamp(),
+    planExpiresAt:      expiresAt,
     updatedAt:          admin.firestore.FieldValue.serverTimestamp(),
   });
 }
 
 async function markLessonFeePaid(uid) {
+  const now       = new Date();
+  const expiresAt = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000); // 30 days
   await getDb().collection('users').doc(uid).update({
-    lessonFeePaid: true,
-    updatedAt:     admin.firestore.FieldValue.serverTimestamp(),
+    lessonFeePaid:      true,
+    lessonFeePaidAt:    admin.firestore.Timestamp.fromDate(now),
+    lessonFeeExpiresAt: admin.firestore.Timestamp.fromDate(expiresAt),
+    updatedAt:          admin.firestore.FieldValue.serverTimestamp(),
   });
+}
+
+function buildPeriodMeta() {
+  const now  = new Date();
+  const label = now.toLocaleString('en-NG', { month: 'long', year: 'numeric' }); // e.g. "May 2026"
+  const start = new Date(now.getFullYear(), now.getMonth(), 1);
+  const end   = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000); // 30 days from payment
+  return { periodLabel: label, periodStart: start, periodEnd: end };
 }
 
 async function savePaymentRecord(uid, { reference, type, plan, amount, description, status = 'success' }) {
   try {
+    const base = {
+      uid,
+      reference,
+      type:        type || 'plan_upgrade',
+      plan:        plan || null,
+      amount:      amount || 0,
+      description: description || (plan ? `${plan} plan upgrade` : 'Lesson fee payment'),
+      status,
+      createdAt:   admin.firestore.FieldValue.serverTimestamp(),
+    };
+    if (type === 'lesson_fee') {
+      const { periodLabel, periodStart, periodEnd } = buildPeriodMeta();
+      base.periodLabel = periodLabel;
+      base.periodStart = admin.firestore.Timestamp.fromDate(periodStart);
+      base.periodEnd   = admin.firestore.Timestamp.fromDate(periodEnd);
+    }
     await getDb()
       .collection('users').doc(uid)
       .collection('payments').doc(reference)
-      .set({
-        uid,
-        reference,
-        type:        type || 'plan_upgrade',
-        plan:        plan || null,
-        amount:      amount || 0,
-        description: description || (plan ? `${plan} plan upgrade` : 'Lesson fee payment'),
-        status,
-        createdAt:   admin.firestore.FieldValue.serverTimestamp(),
-      }, { merge: true });
+      .set(base, { merge: true });
   } catch (err) {
     logger.warn('Failed to save payment record', { uid, reference, error: err.message });
   }
