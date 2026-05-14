@@ -100,6 +100,49 @@ router.post('/send', requireAdmin, asyncHandler(async (req, res) => {
   res.json({ success: true, ...result });
 }));
 
+// ─── POST /api/notifications/blog-published (admin only) ────────────────────
+// Called by the frontend when a blog post is published for the first time.
+// Sends a push notification + in-app notification to all users.
+router.post('/blog-published', requireAdmin, asyncHandler(async (req, res) => {
+  const { title, slug, excerpt } = req.body;
+  if (!title || !slug) {
+    return res.status(400).json({ error: 'title and slug are required' });
+  }
+
+  const db       = getDb();
+  const body     = excerpt ? excerpt.slice(0, 120) : 'Read the latest article on the NLTC Blog';
+  const url      = `/blog/${slug}`;
+  const notifData = { type: 'new_blog', url };
+
+  // 1. In-app notification to all users
+  broadcastInAppNotification({
+    filter:    'all',
+    title:     `📖 New Article: ${title}`,
+    body,
+    type:      'new_blog',
+    iconEmoji: '📖',
+    data:      notifData,
+  }).catch(e => logger.error('blog in-app broadcast failed', { err: e.message }));
+
+  // 2. FCM push to all users
+  db.collection('users').get()
+    .then(async snap => {
+      const tokens = [];
+      snap.forEach(d => tokens.push(...(d.data().fcmTokens || [])));
+      if (tokens.length) {
+        await sendPushToTokens(tokens, {
+          title: `📖 New on NLTC Blog`,
+          body:  title,
+          data:  { ...notifData, url: `https://nltc.com.ng${url}` },
+        });
+      }
+    })
+    .catch(e => logger.error('blog push failed', { err: e.message }));
+
+  logger.info('Blog published notification sent', { title, slug, by: req.user.uid });
+  res.json({ success: true });
+}));
+
 // ─── GET /api/notifications/me ───────────────────────────────────────────────
 router.get('/me', requireAuth, asyncHandler(async (req, res) => {
   const db   = getDb();

@@ -5,6 +5,7 @@ const asyncHandler             = require('../utils/asyncHandler');
 const logger                   = require('../utils/logger');
 const { getDb }                = require('../../config/firebase');
 const { sendInAppNotification, sendPushToTokens } = require('../services/notificationService');
+const { sendWelcomeEmail } = require('../services/emailService');
 
 const router = express.Router();
 
@@ -93,6 +94,9 @@ router.post('/on-signup', requireAuth, asyncHandler(async (req, res) => {
     });
     await batch.commit();
   }
+
+  // 5. CEO welcome email (fire-and-forget)
+  sendWelcomeEmail({ email, firstName }).catch(() => {});
 
   logger.info('New student signed up', { uid, email });
   res.status(201).json({ success: true, uid });
