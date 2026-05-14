@@ -1,43 +1,30 @@
-const nodemailer = require('nodemailer');
+const { Resend } = require('resend');
 const logger     = require('../utils/logger');
 
-let transporter = null;
+let resend = null;
 
-function getTransporter() {
-  if (transporter) return transporter;
-
-  const user = process.env.EMAIL_USER;
-  const pass = process.env.EMAIL_PASS;
-
-  if (!user || !pass) {
-    logger.warn('Email service not configured — EMAIL_USER / EMAIL_PASS missing');
+function getResend() {
+  if (resend) return resend;
+  const key = process.env.RESEND_API_KEY;
+  if (!key) {
+    logger.warn('Email service not configured — RESEND_API_KEY missing');
     return null;
   }
-
-  // Explicit Gmail SMTP settings (more reliable than service:'gmail' shorthand)
-  transporter = nodemailer.createTransport({
-    host:   'smtp.gmail.com',
-    port:   587,
-    secure: false,        // STARTTLS on port 587
-    auth:   { user, pass },
-    tls:    { rejectUnauthorized: false },
-  });
-
-  return transporter;
+  resend = new Resend(key);
+  return resend;
 }
 
 async function verifyTransporter() {
-  const t = getTransporter();
-  if (!t) return false;
-  try {
-    await t.verify();
-    logger.info('Email transporter verified OK', { user: process.env.EMAIL_USER });
+  const r = getResend();
+  if (!r) return false;
+  // Resend has no verify() call — confirm the key exists and looks valid
+  const key = process.env.RESEND_API_KEY || '';
+  if (key.startsWith('re_')) {
+    logger.info('Resend client ready', { from: process.env.RESEND_FROM_EMAIL });
     return true;
-  } catch (err) {
-    logger.error('Email transporter verify FAILED', { err: err.message });
-    transporter = null; // reset so next call retries
-    return false;
   }
+  logger.error('RESEND_API_KEY does not look valid (should start with re_)');
+  return false;
 }
 
 function buildWelcomeHtml(firstName) {
@@ -184,24 +171,23 @@ function buildWelcomeHtml(firstName) {
 async function sendWelcomeEmail({ email, firstName }) {
   if (!email) { logger.warn('sendWelcomeEmail: no email provided'); return; }
 
-  const t = getTransporter();
-  if (!t) { logger.warn('sendWelcomeEmail: transporter not available — check EMAIL_USER/EMAIL_PASS'); return; }
+  const r = getResend();
+  if (!r) { logger.warn('sendWelcomeEmail: Resend client not available — check RESEND_API_KEY'); return; }
 
   const fromName  = process.env.EMAIL_FROM_NAME || 'Samuel Olusanya — NLTC Online';
-  const fromEmail = process.env.EMAIL_USER;
+  const fromEmail = process.env.RESEND_FROM_EMAIL || 'no-reply@nltc.ng';
 
   try {
-    const info = await t.sendMail({
-      from:    `"${fromName}" <${fromEmail}>`,
+    const { data, error } = await r.emails.send({
+      from:    `${fromName} <${fromEmail}>`,
       to:      email,
       subject: `Welcome to NLTC Online, ${firstName || 'Student'}! 🎓`,
       html:    buildWelcomeHtml(firstName),
     });
-    logger.info('Welcome email sent', { email, messageId: info.messageId });
+    if (error) throw new Error(error.message);
+    logger.info('Welcome email sent', { email, id: data?.id });
   } catch (err) {
-    logger.error('Failed to send welcome email', { email, err: err.message, code: err.code });
-    // Reset transporter so next request retries with fresh connection
-    transporter = null;
+    logger.error('Failed to send welcome email', { email, err: err.message });
   }
 }
 
