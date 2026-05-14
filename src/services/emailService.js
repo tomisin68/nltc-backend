@@ -31,15 +31,16 @@ function buildWelcomeHtml(firstName) {
   const name = firstName ? firstName.trim() : 'Student';
   const year = new Date().getFullYear();
 
-  const featureRows = [
-    ['📝', 'CBT practice tests to sharpen your exam performance'],
-    ['🎬', 'Video lessons to break down difficult topics'],
-    ['📡', 'Live classes to keep you engaged and accountable'],
-    ['📊', 'A simple system to track your progress and payments'],
-  ].map(([icon, text]) => `
+  const featureItems = [
+    'CBT practice tests to sharpen your exam performance',
+    'Video lessons to break down difficult topics',
+    'Live classes to keep you engaged and accountable',
+    'A simple system to track your progress and payments',
+  ].map(text => `
     <tr>
-      <td width="32" valign="top" style="padding:6px 0;font-size:18px;">${icon}</td>
-      <td style="padding:6px 0 6px 8px;font-size:15px;color:#374151;line-height:1.6;">${text}</td>
+      <td valign="top" style="padding:5px 0;font-size:15px;color:#374151;line-height:1.6;">
+        &bull;&nbsp;&nbsp;${text}
+      </td>
     </tr>`).join('');
 
   return `<!DOCTYPE html>
@@ -89,7 +90,7 @@ function buildWelcomeHtml(firstName) {
 
               <!-- Feature list -->
               <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px;background:#f8f9fc;border-radius:10px;padding:8px 16px;">
-                <tbody>${featureRows}</tbody>
+                <tbody>${featureItems}</tbody>
               </table>
 
               <!-- Highlighted callout -->
@@ -181,7 +182,7 @@ async function sendWelcomeEmail({ email, firstName }) {
     const { data, error } = await r.emails.send({
       from:    `${fromName} <${fromEmail}>`,
       to:      email,
-      subject: `Welcome to NLTC Online, ${firstName || 'Student'}! 🎓`,
+      subject: `Welcome to NLTC Online, ${firstName || 'Student'}!`,
       html:    buildWelcomeHtml(firstName),
     });
     if (error) throw new Error(error.message);
