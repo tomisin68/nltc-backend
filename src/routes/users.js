@@ -5,7 +5,8 @@ const asyncHandler             = require('../utils/asyncHandler');
 const logger                   = require('../utils/logger');
 const { getDb }                = require('../../config/firebase');
 const { sendInAppNotification, sendPushToTokens } = require('../services/notificationService');
-const { sendWelcomeEmail } = require('../services/emailService');
+const { sendWelcomeEmail, verifyTransporter } = require('../services/emailService');
+const { requireAdmin } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -100,6 +101,24 @@ router.post('/on-signup', requireAuth, asyncHandler(async (req, res) => {
 
   logger.info('New student signed up', { uid, email });
   res.status(201).json({ success: true, uid });
+}));
+
+// ─── POST /api/users/test-email (admin only) ─────────────────────────────────
+// Sends a test welcome email to verify the Gmail SMTP config is working.
+// Usage: POST { "email": "target@example.com", "firstName": "Test" }
+router.post('/test-email', requireAdmin, asyncHandler(async (req, res) => {
+  const { email, firstName = 'Test' } = req.body;
+  if (!email) return res.status(400).json({ error: 'email is required' });
+
+  const ok = await verifyTransporter();
+  if (!ok) {
+    return res.status(500).json({
+      error: 'SMTP connection failed — check EMAIL_USER and EMAIL_PASS env vars on Render',
+    });
+  }
+
+  await sendWelcomeEmail({ email, firstName });
+  res.json({ success: true, message: `Welcome email dispatched to ${email}` });
 }));
 
 module.exports = router;

@@ -14,12 +14,30 @@ function getTransporter() {
     return null;
   }
 
+  // Explicit Gmail SMTP settings (more reliable than service:'gmail' shorthand)
   transporter = nodemailer.createTransport({
-    service: 'gmail',
-    auth: { user, pass },
+    host:   'smtp.gmail.com',
+    port:   587,
+    secure: false,        // STARTTLS on port 587
+    auth:   { user, pass },
+    tls:    { rejectUnauthorized: false },
   });
 
   return transporter;
+}
+
+async function verifyTransporter() {
+  const t = getTransporter();
+  if (!t) return false;
+  try {
+    await t.verify();
+    logger.info('Email transporter verified OK', { user: process.env.EMAIL_USER });
+    return true;
+  } catch (err) {
+    logger.error('Email transporter verify FAILED', { err: err.message });
+    transporter = null; // reset so next call retries
+    return false;
+  }
 }
 
 function buildWelcomeHtml(firstName) {
@@ -164,23 +182,27 @@ function buildWelcomeHtml(firstName) {
  * Fire-and-forget safe — never throws.
  */
 async function sendWelcomeEmail({ email, firstName }) {
+  if (!email) { logger.warn('sendWelcomeEmail: no email provided'); return; }
+
   const t = getTransporter();
-  if (!t || !email) return;
+  if (!t) { logger.warn('sendWelcomeEmail: transporter not available — check EMAIL_USER/EMAIL_PASS'); return; }
 
   const fromName  = process.env.EMAIL_FROM_NAME || 'Samuel Olusanya — NLTC Online';
   const fromEmail = process.env.EMAIL_USER;
 
   try {
-    await t.sendMail({
+    const info = await t.sendMail({
       from:    `"${fromName}" <${fromEmail}>`,
       to:      email,
       subject: `Welcome to NLTC Online, ${firstName || 'Student'}! 🎓`,
       html:    buildWelcomeHtml(firstName),
     });
-    logger.info('Welcome email sent', { email });
+    logger.info('Welcome email sent', { email, messageId: info.messageId });
   } catch (err) {
-    logger.error('Failed to send welcome email', { email, err: err.message });
+    logger.error('Failed to send welcome email', { email, err: err.message, code: err.code });
+    // Reset transporter so next request retries with fresh connection
+    transporter = null;
   }
 }
 
-module.exports = { sendWelcomeEmail };
+module.exports = { sendWelcomeEmail, verifyTransporter };
