@@ -19,6 +19,7 @@ const broadcastsRouter     = require('./routes/broadcasts');
 const videosRouter         = require('./routes/videos');
 const scheduleRouter       = require('./routes/schedule');
 const settingsRouter       = require('./routes/settings');
+const centersRouter        = require('./routes/centers');
 
 initFirebase();
 
@@ -105,6 +106,7 @@ app.use('/api/broadcasts',     broadcastsRouter);
 app.use('/api/videos',         videosRouter);
 app.use('/api/schedule',       scheduleRouter);
 app.use('/api/settings',      settingsRouter);
+app.use('/api/centers',       centersRouter);
 
 app.use((req,res) => res.status(404).json({ error:`Route not found: ${req.method} ${req.path}` }));
 
