@@ -143,6 +143,93 @@ router.post('/blog-published', requireAdmin, asyncHandler(async (req, res) => {
   res.json({ success: true });
 }));
 
+// ─── POST /api/notifications/cm-send (center manager only) ──────────────────
+// Called by CM for broadcasts and schedule changes — sends FCM push to center
+// students and writes in-app notifications to students + admins.
+router.post('/cm-send', requireAuth, asyncHandler(async (req, res) => {
+  const db       = getDb();
+  const userSnap = await db.collection('users').doc(req.user.uid).get();
+  const userData = userSnap.data() || {};
+
+  if (userData.role !== 'center_manager') {
+    return res.status(403).json({ error: 'Center manager access required' });
+  }
+
+  const { centerId, centerName, title, body, type, data: extraData } = req.body;
+  if (!centerId || !title || !body) {
+    return res.status(400).json({ error: 'centerId, title, and body are required' });
+  }
+
+  if (userData.center !== centerId) {
+    return res.status(403).json({ error: 'You can only send notifications for your own center' });
+  }
+
+  const [studentsSnap, adminSnap] = await Promise.all([
+    db.collection('users').where('center', '==', centerId).where('role', '==', 'student').get(),
+    db.collection('users').where('role', 'in', ['admin', 'super_admin']).get(),
+  ]);
+
+  const studentTokens = [];
+  const studentIds    = [];
+  studentsSnap.forEach(d => {
+    studentIds.push(d.id);
+    studentTokens.push(...(d.data().fcmTokens || []));
+  });
+
+  const adminTokens = [];
+  const adminIds    = [];
+  adminSnap.forEach(d => {
+    adminIds.push(d.id);
+    adminTokens.push(...(d.data().fcmTokens || []));
+  });
+
+  // FCM push to students
+  if (studentTokens.length) {
+    sendPushToTokens(studentTokens, { title, body, data: extraData || {} })
+      .catch(e => logger.error('CM student push failed', { err: e.message }));
+  }
+
+  // FCM push to admins
+  if (adminTokens.length) {
+    sendPushToTokens(adminTokens, {
+      title: `[${centerName}] ${title}`,
+      body,
+      data: { ...(extraData || {}), centerId, centerName },
+    }).catch(e => logger.error('CM admin push failed', { err: e.message }));
+  }
+
+  // In-app notifications via batch write
+  const notifType = type || 'center_announcement';
+  const batch     = db.batch();
+
+  studentIds.forEach(uid => {
+    const ref = db.collection('users').doc(uid).collection('notifications').doc();
+    batch.set(ref, {
+      title, body, type: notifType,
+      data:      { centerId, centerName, ...(extraData || {}) },
+      iconEmoji: '📢', read: false,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+  });
+
+  adminIds.forEach(uid => {
+    const ref = db.collection('users').doc(uid).collection('notifications').doc();
+    batch.set(ref, {
+      title:     `[${centerName}] ${title}`,
+      body,
+      type:      'center_announcement_alert',
+      data:      { centerId, centerName, ...(extraData || {}) },
+      iconEmoji: '📣', read: false,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+  });
+
+  await batch.commit();
+
+  logger.info('CM notification sent', { centerId, by: req.user.uid, students: studentIds.length, admins: adminIds.length });
+  res.json({ success: true, students: studentIds.length, admins: adminIds.length });
+}));
+
 // ─── GET /api/notifications/me ───────────────────────────────────────────────
 router.get('/me', requireAuth, asyncHandler(async (req, res) => {
   const db   = getDb();
