@@ -55,6 +55,17 @@ function isYesterday(d) {
   return isSameDay(d, y);
 }
 
+// ─── Achievement definitions (mirrors frontend ALL_ACHIEVEMENTS) ──────────────
+const ACHIEVEMENT_CHECKS = [
+  { id: 'first_lesson', test: (_xp, _streak, _cbt, action) => action === 'watch_lesson' },
+  { id: 'streak_3',     test: (_xp, streak)                => streak >= 3 },
+  { id: 'streak_7',     test: (_xp, streak)                => streak >= 7 },
+  { id: 'cbt_5',        test: (_xp, _s, cbt)               => cbt >= 5 },
+  { id: 'cbt_10',       test: (_xp, _s, cbt)               => cbt >= 10 },
+  { id: 'xp_500',       test: (xp)                         => xp >= 500 },
+  { id: 'xp_1000',      test: (xp)                         => xp >= 1000 },
+];
+
 // ─── Core award function (Firestore transaction) ─────────────────────────────
 async function awardXP(uid, action, meta = {}) {
   const db      = getDb();
@@ -75,6 +86,7 @@ async function awardXP(uid, action, meta = {}) {
         streakBonusAwarded: false,
         alreadyAwarded:     true,
         leveledUp:          false,
+        newAchievements:    [],
         ...xpToLevel(profile.xp || 0),
       };
     }
@@ -95,6 +107,7 @@ async function awardXP(uid, action, meta = {}) {
         newStreak:          streak,
         streakBonusAwarded: false,
         leveledUp:          false,
+        newAchievements:    [],
         ...xpToLevel(profile.xp || 0),
       };
     }
@@ -119,16 +132,35 @@ async function awardXP(uid, action, meta = {}) {
     const levelInfo = xpToLevel(newXP);
     const leveledUp = levelInfo.level > oldLevel;
 
+    // ── cbtCount: increment atomically on cbt_session ────────────────
+    const newCbtCount = (profile.cbtCount || 0) + (action === 'cbt_session' ? 1 : 0);
+
+    // ── Achievements: unlock any newly qualifying badges ──────────────
+    const existing        = profile.achievements || [];
+    const allUnlocked     = [...existing];
+    for (const { id, test } of ACHIEVEMENT_CHECKS) {
+      if (!allUnlocked.includes(id) && test(newXP, streak, newCbtCount, action)) {
+        allUnlocked.push(id);
+      }
+    }
+    const newAchievements = allUnlocked.filter(id => !existing.includes(id));
+
     const updates = {
       xp:             newXP,
       streak,
+      cbtCount:       newCbtCount,
       lastActivityAt: admin.firestore.FieldValue.serverTimestamp(),
     };
     if (action === 'first_login') updates.firstLoginXpAwarded = true;
+    if (newAchievements.length > 0) updates.achievements = allUnlocked;
 
     tx.update(userRef, updates);
 
-    return { newXP, xpEarned, newStreak: streak, streakBonusAwarded, leveledUp, ...levelInfo };
+    return {
+      newXP, xpEarned, newStreak: streak, streakBonusAwarded, leveledUp,
+      newCbtCount, newAchievements,
+      ...levelInfo,
+    };
   });
 }
 
@@ -275,12 +307,26 @@ router.get(
       // Index may still be building — return null rank rather than 500
     }
 
+    // Award top_10 / top_50 achievements if rank qualifies
+    const newAchievements = [];
+    if (rank !== null) {
+      const existing = userSnap.data().achievements || [];
+      if (rank <= 10 && !existing.includes('top_10')) newAchievements.push('top_10');
+      if (rank <= 50 && !existing.includes('top_50')) newAchievements.push('top_50');
+      if (newAchievements.length > 0) {
+        await db.collection('users').doc(req.user.uid).update({
+          achievements: admin.firestore.FieldValue.arrayUnion(...newAchievements),
+        });
+      }
+    }
+
     res.json({
       success: true,
       rank,
       xp: myXP,
       streak,
       totalStudents,
+      newAchievements,
       ...xpToLevel(myXP),
     });
   }),
