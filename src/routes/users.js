@@ -103,6 +103,89 @@ router.post('/on-signup', requireAuth, asyncHandler(async (req, res) => {
   res.status(201).json({ success: true, uid });
 }));
 
+// ─── POST /api/users/create-admin (admin only) ───────────────────────────────
+// Creates a Firebase Auth user with role=admin and emails them their credentials.
+router.post('/create-admin', requireAdmin, asyncHandler(async (req, res) => {
+  const { email, firstName, lastName = '', phone = '' } = req.body;
+  if (!email || !firstName) return res.status(400).json({ error: 'email and firstName are required' });
+
+  const db           = getDb();
+  const authInstance = admin.auth();
+
+  let uid, tempPassword;
+
+  try {
+    const existing = await authInstance.getUserByEmail(email);
+    uid = existing.uid;
+    // Existing account: update role in Firestore, no new password
+    await db.collection('users').doc(uid).set({
+      uid, email,
+      firstName: firstName.trim(),
+      lastName:  lastName.trim(),
+      phone:     phone.trim(),
+      role:      'admin',
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+  } catch (e) {
+    if (e.code === 'auth/user-not-found') {
+      tempPassword = Math.random().toString(36).slice(-8)
+        + Math.random().toString(36).toUpperCase().slice(-4) + '!7';
+      const newUser = await authInstance.createUser({
+        email,
+        password:    tempPassword,
+        displayName: `${firstName} ${lastName}`.trim(),
+      });
+      uid = newUser.uid;
+      await db.collection('users').doc(uid).set({
+        uid, email,
+        firstName: firstName.trim(),
+        lastName:  lastName.trim(),
+        phone:     phone.trim(),
+        role:      'admin',
+        plan:      'free',
+        xp: 0, streak: 0, achievements: [], fcmTokens: [],
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    } else {
+      throw e;
+    }
+  }
+
+  // Email credentials
+  const { Resend } = require('resend');
+  if (process.env.RESEND_API_KEY) {
+    try {
+      const resend     = new Resend(process.env.RESEND_API_KEY);
+      const fromName   = process.env.EMAIL_FROM_NAME  || 'NLTC Online';
+      const fromEmail  = process.env.RESEND_FROM_EMAIL || 'no-reply@nltc.com.ng';
+      const loginUrl   = `${process.env.FRONTEND_URL || 'https://nltc.com.ng'}/auth`;
+      await resend.emails.send({
+        from:    `${fromName} <${fromEmail}>`,
+        to:      email,
+        subject: 'You have been added as an NLTC Online Admin',
+        html: `
+          <div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:32px 24px;">
+            <h2 style="color:#0B1D3A;">Welcome, ${firstName}!</h2>
+            <p>You have been granted <strong>Admin</strong> access to the NLTC Online platform.</p>
+            <div style="background:#f8f9fc;border-radius:8px;padding:16px;margin:20px 0;">
+              <p style="margin:0 0 8px;"><strong>Login Email:</strong> ${email}</p>
+              ${tempPassword ? `<p style="margin:0;"><strong>Temporary Password:</strong> <code style="background:#e5e7eb;padding:2px 6px;border-radius:4px;">${tempPassword}</code></p>` : ''}
+            </div>
+            ${tempPassword ? '<p style="color:#6b7280;font-size:.9rem;">Please change your password after your first login.</p>' : ''}
+            <a href="${loginUrl}" style="display:inline-block;background:#D4A017;color:#0B1D3A;padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:700;margin-top:8px;">Log In Now</a>
+            <p style="color:#9ca3af;font-size:.8rem;margin-top:32px;">&copy; ${new Date().getFullYear()} Next Level Tutorial College</p>
+          </div>`,
+      });
+    } catch (mailErr) {
+      logger.warn('Admin welcome email failed', { email, err: mailErr.message });
+    }
+  }
+
+  logger.info('Admin account created', { uid, email, by: req.user.uid });
+  res.status(201).json({ success: true, uid, message: `Admin account for ${email} created successfully` });
+}));
+
 // ─── POST /api/users/test-email (admin only) ─────────────────────────────────
 // Sends a test welcome email to verify the Gmail SMTP config is working.
 // Usage: POST { "email": "target@example.com", "firstName": "Test" }
