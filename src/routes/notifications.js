@@ -11,6 +11,167 @@ const {
 
 const router = express.Router();
 
+// ─── Chat notification throttle ──────────────────────────────────────────────
+// Prevents push spam when messages arrive in rapid succession.
+// Key: `${recipientUid}:${chatId}`, value: timestamp of last push sent.
+// One notification per recipient per chat per THROTTLE_MS window.
+const chatNotifThrottle = new Map();
+const THROTTLE_MS = 30_000; // 30 seconds
+
+function shouldSendPush(uid, chatId) {
+  const key  = `${uid}:${chatId}`;
+  const last = chatNotifThrottle.get(key) || 0;
+  if (Date.now() - last < THROTTLE_MS) return false;
+  chatNotifThrottle.set(key, Date.now());
+  return true;
+}
+
+// Prune stale throttle entries every 5 minutes to prevent memory leak
+setInterval(() => {
+  const cutoff = Date.now() - THROTTLE_MS;
+  for (const [k, v] of chatNotifThrottle.entries()) {
+    if (v < cutoff) chatNotifThrottle.delete(k);
+  }
+}, 5 * 60_000).unref();
+
+// ─── POST /api/notifications/chat-message ────────────────────────────────────
+// Called client-side (fire-and-forget) after a message is successfully written
+// to Firestore. Sends FCM push + in-app notification to all members except the
+// sender, skipping anyone within the throttle window.
+//
+// Body: { chatId, messageText, chatType ('dm'|'group'), chatName, senderName }
+router.post('/chat-message', requireAuth, asyncHandler(async (req, res) => {
+  const { chatId, messageText, chatType, chatName, senderName } = req.body;
+
+  if (!chatId || !messageText) {
+    return res.status(400).json({ error: 'chatId and messageText are required' });
+  }
+
+  const db       = getDb();
+  const chatSnap = await db.collection('chats').doc(chatId).get();
+
+  if (!chatSnap.exists) {
+    return res.status(404).json({ error: 'Chat not found' });
+  }
+
+  const chat    = chatSnap.data();
+  const members = chat.members || [];
+
+  // Verify the sender is actually a member (security guard)
+  if (!members.includes(req.user.uid)) {
+    return res.status(403).json({ error: 'Not a member of this chat' });
+  }
+
+  const recipients = members.filter(uid => uid !== req.user.uid);
+  if (!recipients.length) {
+    return res.json({ success: true, sent: 0, skipped: 0 });
+  }
+
+  // Fetch all recipients in one batched read
+  const recipientDocs = await Promise.all(
+    recipients.map(uid => db.collection('users').doc(uid).get()),
+  );
+
+  const preview = messageText.length > 120
+    ? messageText.slice(0, 117) + '…'
+    : messageText;
+
+  const senderFirst = (senderName || 'Someone').split(' ')[0];
+
+  // Build notification content based on chat type
+  const isGroup  = chatType === 'group';
+  const pushTitle = isGroup
+    ? `💬 ${chatName || 'Group Chat'}`
+    : `💬 ${senderName || 'New message'}`;
+  const pushBody  = isGroup
+    ? `${senderFirst}: ${preview}`
+    : preview;
+
+  const deepLink  = `https://nltc.com.ng/dashboard?view=chat&chatId=${chatId}`;
+
+  const fcmTokens   = [];
+  const inAppWrites = [];
+  let   skipped     = 0;
+
+  for (const snap of recipientDocs) {
+    if (!snap.exists) continue;
+    const uid      = snap.id;
+    const userData = snap.data();
+
+    // In-app notification for ALL recipients (always, regardless of throttle/presence)
+    inAppWrites.push({
+      ref:  snap.ref.collection('notifications').doc(),
+      data: {
+        title:     isGroup
+          ? `New message in ${chatName || 'Group'}`
+          : `New message from ${senderName || 'Someone'}`,
+        body:      isGroup ? `${senderFirst}: ${preview}` : preview,
+        type:      'chat_message',
+        iconEmoji: '💬',
+        data:      { chatId, chatType, url: `/dashboard?view=chat&chatId=${chatId}` },
+        read:      false,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+    });
+
+    // FCM push — skip if throttled (already notified recently for this chat)
+    if (!shouldSendPush(uid, chatId)) {
+      skipped++;
+      continue;
+    }
+
+    // Skip push if the user is currently online (they'll see the unread badge)
+    // "Online" = online flag is true AND last seen within 3 minutes
+    const isOnline = userData.online === true &&
+      userData.lastSeen?.toMillis &&
+      Date.now() - userData.lastSeen.toMillis() < 3 * 60_000;
+
+    if (isOnline) {
+      skipped++;
+      continue;
+    }
+
+    const tokens = userData.fcmTokens || [];
+    fcmTokens.push(...tokens.map(token => ({ uid, token })));
+  }
+
+  // Write all in-app notifications in a single batch
+  if (inAppWrites.length) {
+    const CHUNK = 490;
+    for (let i = 0; i < inAppWrites.length; i += CHUNK) {
+      const batch = db.batch();
+      inAppWrites.slice(i, i + CHUNK).forEach(({ ref, data }) => batch.set(ref, data));
+      await batch.commit();
+    }
+  }
+
+  // Send FCM push (fire-and-forget — don't block the response)
+  let pushSent = 0;
+  if (fcmTokens.length) {
+    const flatTokens = fcmTokens.map(t => t.token);
+    sendPushToTokens(flatTokens, {
+      title: pushTitle,
+      body:  pushBody,
+      data:  {
+        type:    'chat_message',
+        chatId,
+        chatType: chatType || 'dm',
+        chatName: chatName || '',
+        url:      deepLink,
+      },
+    })
+      .then(r => {
+        pushSent = r.sent;
+        logger.info('Chat push sent', {
+          chatId, by: req.user.uid, sent: r.sent, total: r.total, skipped,
+        });
+      })
+      .catch(e => logger.error('Chat push failed', { chatId, err: e.message }));
+  }
+
+  res.json({ success: true, sent: fcmTokens.length, inApp: inAppWrites.length, skipped });
+}));
+
 // ─── POST /api/notifications/register-token ──────────────────────────────────
 router.post('/register-token', requireAuth, asyncHandler(async (req, res) => {
   const { fcmToken, platform } = req.body;
