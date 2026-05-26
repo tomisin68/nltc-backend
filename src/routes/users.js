@@ -30,7 +30,13 @@ router.post('/on-signup', requireAuth, asyncHandler(async (req, res) => {
   const email = req.user.email || req.userData?.email || '';
   const name  = `${firstName} ${lastName}`.trim();
 
-  // 1. Create / merge the user document
+  // 1. Check existing role so on-signup never downgrades admin → student
+  const existing = await db.collection('users').doc(uid).get();
+  const existingRole = existing.exists ? existing.data().role : null;
+  const protectedRoles = ['admin', 'super_admin', 'teacher', 'center_manager'];
+  const assignedRole = protectedRoles.includes(existingRole) ? existingRole : 'student';
+
+  // 2. Create / merge the user document
   await db.collection('users').doc(uid).set(
     {
       uid,
@@ -41,7 +47,7 @@ router.post('/on-signup', requireAuth, asyncHandler(async (req, res) => {
       state,
       targetExam,
       plan,
-      role:         'student',
+      role:         assignedRole,
       xp:           0,
       streak:       0,
       cbtCount:     0,
