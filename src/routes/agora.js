@@ -80,4 +80,26 @@ router.post('/token',
   }),
 );
 
+// POST /api/agora/call-token
+// Peer-to-peer call token — any authenticated real user can get a host token
+// for channels that begin with "call_" (format: call_<chatId>_<timestamp>).
+// The existing /token endpoint is kept restricted to admins/teachers for live classes.
+router.post('/call-token',
+  agoraLimiter,
+  requireAuth,
+  [
+    body('channelName')
+      .notEmpty().trim()
+      .matches(/^call_[a-zA-Z0-9_-]+$/)
+      .withMessage('channelName must start with "call_" and be alphanumeric'),
+  ],
+  validate,
+  asyncHandler(async (req, res) => {
+    const { channelName } = req.body;
+    const result = generateRtcToken(channelName, req.user.uid, 'host');
+    logger.info('Agora call token issued', { uid: req.user.uid, channelName });
+    res.json({ success: true, ...result });
+  }),
+);
+
 module.exports = router;
