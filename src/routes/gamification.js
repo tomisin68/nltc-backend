@@ -19,9 +19,10 @@ function computeBaseXP(action, meta = {}) {
     case 'watch_lesson':  return 20;
     case 'join_live':     return 30;
     case 'first_login':   return 100;
-    case 'daily_streak':  return 0;   // streak bonus (+50) is added by streak logic
+    case 'daily_streak':   return 0;   // streak bonus (+50) is added by streak logic
+    case 'daily_mission':  return 25;  // per completed daily mission task
     // spec formula: Math.round(score * 0.5) + (score >= 70 ? 20 : 0), max 70 XP
-    case 'cbt_session':   return Math.round(score * 0.5) + (score >= 70 ? 20 : 0);
+    case 'cbt_session':    return Math.round(score * 0.5) + (score >= 70 ? 20 : 0);
     default: throw new Error(`Unknown action: ${action}`);
   }
 }
@@ -169,8 +170,8 @@ router.post(
   '/xp',
   [
     body('action')
-      .isIn(['watch_lesson', 'cbt_session', 'join_live', 'first_login', 'daily_streak'])
-      .withMessage('action must be one of: watch_lesson, cbt_session, join_live, first_login, daily_streak'),
+      .isIn(['watch_lesson', 'cbt_session', 'join_live', 'first_login', 'daily_streak', 'daily_mission'])
+      .withMessage('action must be one of: watch_lesson, cbt_session, join_live, first_login, daily_streak, daily_mission'),
     body('meta').optional().isObject().withMessage('meta must be an object'),
   ],
   validate,

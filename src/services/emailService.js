@@ -192,4 +192,239 @@ async function sendWelcomeEmail({ email, firstName }) {
   }
 }
 
-module.exports = { sendWelcomeEmail, verifyTransporter };
+/**
+ * Weekly progress report email — sent every Sunday to student (+ parent if set).
+ */
+async function sendWeeklyProgressEmail({ email, firstName, stats, parentEmail }) {
+  const r = getResend();
+  if (!r || !email) return;
+
+  const fromName  = process.env.EMAIL_FROM_NAME  || 'NLTC Online';
+  const fromEmail = process.env.RESEND_FROM_EMAIL || 'no-reply@nltc.ng';
+  const name = firstName || 'Student';
+
+  const { cbtSessions = 0, totalCorrect = 0, totalQuestions = 0,
+          xpEarned = 0, streak = 0, lessonsWatched = 0 } = stats;
+  const pct = totalQuestions > 0 ? Math.round(totalCorrect / totalQuestions * 100) : 0;
+  const weekRange = (() => {
+    const now = new Date();
+    const start = new Date(now); start.setDate(now.getDate() - 6);
+    return `${start.toLocaleDateString('en-NG', { day:'numeric', month:'short' })} – ${now.toLocaleDateString('en-NG', { day:'numeric', month:'short', year:'numeric' })}`;
+  })();
+
+  const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/>
+<title>Weekly Progress Report</title></head>
+<body style="margin:0;padding:0;background:#f5f7fa;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f7fa;padding:32px 16px;"><tr><td align="center">
+<table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 32px rgba(0,0,0,.08);">
+  <tr><td style="background:#0B1D3A;padding:30px 40px;text-align:center;">
+    <p style="margin:0;color:#D4A017;font-size:11px;font-weight:700;letter-spacing:3px;text-transform:uppercase;">NLTC Online</p>
+    <h1 style="margin:8px 0 0;color:#ffffff;font-size:24px;font-weight:900;">Weekly Progress Report</h1>
+    <p style="margin:6px 0 0;color:rgba(255,255,255,.55);font-size:13px;">${weekRange}</p>
+  </td></tr>
+  <tr><td style="background:linear-gradient(90deg,#D4A017,#f0be45);height:4px;"></td></tr>
+  <tr><td style="padding:36px 40px 28px;">
+    <p style="margin:0 0 20px;font-size:16px;color:#0B1D3A;font-weight:700;">Hello ${name},</p>
+    <p style="margin:0 0 20px;font-size:14px;color:#374151;line-height:1.7;">
+      Here's a summary of ${name}'s study activity on NLTC Online this week.
+    </p>
+    <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px;border-radius:10px;overflow:hidden;border:1px solid #e5e7eb;">
+      <tr style="background:#f8f9fc;">
+        <td style="padding:10px 16px;font-size:12px;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:.08em;">Metric</td>
+        <td style="padding:10px 16px;font-size:12px;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:.08em;text-align:right;">This Week</td>
+      </tr>
+      <tr style="border-top:1px solid #e5e7eb;">
+        <td style="padding:12px 16px;font-size:14px;color:#374151;"><span style="margin-right:8px;">📝</span> CBT Sessions Completed</td>
+        <td style="padding:12px 16px;font-size:14px;font-weight:700;color:#0B1D3A;text-align:right;">${cbtSessions}</td>
+      </tr>
+      <tr style="border-top:1px solid #e5e7eb;background:#fafafa;">
+        <td style="padding:12px 16px;font-size:14px;color:#374151;"><span style="margin-right:8px;">✅</span> CBT Accuracy</td>
+        <td style="padding:12px 16px;font-size:14px;font-weight:700;color:${pct >= 50 ? '#059669' : '#DC2626'};text-align:right;">${pct}% (${totalCorrect}/${totalQuestions})</td>
+      </tr>
+      <tr style="border-top:1px solid #e5e7eb;">
+        <td style="padding:12px 16px;font-size:14px;color:#374151;"><span style="margin-right:8px;">🎬</span> Video Lessons Watched</td>
+        <td style="padding:12px 16px;font-size:14px;font-weight:700;color:#0B1D3A;text-align:right;">${lessonsWatched}</td>
+      </tr>
+      <tr style="border-top:1px solid #e5e7eb;background:#fafafa;">
+        <td style="padding:12px 16px;font-size:14px;color:#374151;"><span style="margin-right:8px;">⭐</span> XP Earned This Week</td>
+        <td style="padding:12px 16px;font-size:14px;font-weight:700;color:#D4A017;text-align:right;">${xpEarned.toLocaleString()} XP</td>
+      </tr>
+      <tr style="border-top:1px solid #e5e7eb;">
+        <td style="padding:12px 16px;font-size:14px;color:#374151;"><span style="margin-right:8px;">🔥</span> Current Study Streak</td>
+        <td style="padding:12px 16px;font-size:14px;font-weight:700;color:#0B1D3A;text-align:right;">${streak} day${streak !== 1 ? 's' : ''}</td>
+      </tr>
+    </table>
+    ${cbtSessions === 0 && lessonsWatched === 0 ? `
+    <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 20px;">
+      <tr><td style="background:#fef3c7;border-left:4px solid #D4A017;padding:14px 18px;border-radius:0 8px 8px 0;">
+        <p style="margin:0;font-size:14px;color:#92400e;line-height:1.6;">
+          <strong>No activity recorded this week.</strong> Encourage ${name} to log in and practise — even 20 minutes a day makes a big difference!
+        </p>
+      </td></tr>
+    </table>` : `
+    <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 20px;">
+      <tr><td style="background:#f0fdf4;border-left:4px solid #059669;padding:14px 18px;border-radius:0 8px 8px 0;">
+        <p style="margin:0;font-size:14px;color:#065f46;line-height:1.6;">
+          <strong>Great effort this week!</strong> Keep the momentum going — consistency is the key to exam success.
+        </p>
+      </td></tr>
+    </table>`}
+    <table cellpadding="0" cellspacing="0" style="margin:0 0 28px;">
+      <tr><td style="background:#D4A017;border-radius:10px;">
+        <a href="https://nltc.com.ng" style="display:inline-block;padding:13px 32px;color:#0B1D3A;font-weight:800;font-size:14px;text-decoration:none;">
+          Continue Studying &rarr;
+        </a>
+      </td></tr>
+    </table>
+    <p style="margin:0;font-size:13px;color:#9ca3af;line-height:1.6;">
+      This is an automated weekly report from NLTC Online. Reports are sent every Sunday.
+    </p>
+  </td></tr>
+  <tr><td style="background:#f8f9fc;padding:20px 40px;border-top:1px solid #e5e7eb;text-align:center;">
+    <p style="margin:0;font-size:12px;color:#9ca3af;">&copy; ${new Date().getFullYear()} Next Level Tutorial College &nbsp;&middot;&nbsp;
+    <a href="https://nltc.com.ng" style="color:#D4A017;text-decoration:none;">nltc.com.ng</a></p>
+  </td></tr>
+</table></td></tr></table></body></html>`;
+
+  const recipients = [email];
+  if (parentEmail && parentEmail !== email) recipients.push(parentEmail);
+
+  try {
+    for (const to of recipients) {
+      const { error } = await r.emails.send({
+        from:    `${fromName} <${fromEmail}>`,
+        to,
+        subject: `${name}'s Weekly Progress Report — NLTC Online`,
+        html,
+      });
+      if (error) throw new Error(error.message);
+    }
+    logger.info('Weekly progress email sent', { email, parentEmail, cbtSessions, xpEarned });
+  } catch (err) {
+    logger.error('Failed to send weekly progress email', { email, err: err.message });
+  }
+}
+
+/**
+ * 3-day inactivity nudge — sent to the student.
+ */
+async function sendInactivityEmail({ email, firstName, daysMissed }) {
+  const r = getResend();
+  if (!r || !email) return;
+
+  const fromName  = process.env.EMAIL_FROM_NAME  || 'NLTC Online';
+  const fromEmail = process.env.RESEND_FROM_EMAIL || 'no-reply@nltc.ng';
+  const name = firstName || 'Student';
+
+  const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/>
+<title>We miss you!</title></head>
+<body style="margin:0;padding:0;background:#f5f7fa;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f7fa;padding:32px 16px;"><tr><td align="center">
+<table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 32px rgba(0,0,0,.08);">
+  <tr><td style="background:#0B1D3A;padding:30px 40px;text-align:center;">
+    <p style="margin:0;font-size:40px;">📚</p>
+    <h1 style="margin:10px 0 0;color:#ffffff;font-size:22px;font-weight:900;">You've missed ${daysMissed} study days</h1>
+  </tr></tr>
+  <tr><td style="background:linear-gradient(90deg,#D4A017,#f0be45);height:4px;"></td></tr>
+  <tr><td style="padding:36px 40px;">
+    <p style="margin:0 0 16px;font-size:16px;color:#0B1D3A;font-weight:700;">Hey ${name},</p>
+    <p style="margin:0 0 16px;font-size:15px;color:#374151;line-height:1.75;">
+      We noticed you haven't been on NLTC Online for <strong>${daysMissed} days</strong>. Your exam is getting closer — let's get back on track together!
+    </p>
+    <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px;background:#f8f9fc;border-radius:10px;padding:4px 0;">
+      ${['Complete a quick CBT session (just 10 questions!)', 'Watch one short video lesson', 'Check today\'s daily mission on your dashboard']
+        .map(t => `<tr><td style="padding:10px 16px;font-size:14px;color:#374151;line-height:1.6;">✅ &nbsp;${t}</td></tr>`).join('')}
+    </table>
+    <table cellpadding="0" cellspacing="0" style="margin:0 0 28px;">
+      <tr><td style="background:#D4A017;border-radius:10px;">
+        <a href="https://nltc.com.ng" style="display:inline-block;padding:13px 32px;color:#0B1D3A;font-weight:800;font-size:14px;text-decoration:none;">
+          Return to Studying &rarr;
+        </a>
+      </td></tr>
+    </table>
+    <p style="margin:0;font-size:13px;color:#9ca3af;">You got this, ${name}. Small steps every day lead to big results.</p>
+  </td></tr>
+  <tr><td style="background:#f8f9fc;padding:20px 40px;border-top:1px solid #e5e7eb;text-align:center;">
+    <p style="margin:0;font-size:12px;color:#9ca3af;">&copy; ${new Date().getFullYear()} NLTC Online &nbsp;&middot;&nbsp;
+    <a href="https://nltc.com.ng" style="color:#D4A017;text-decoration:none;">nltc.com.ng</a></p>
+  </td></tr>
+</table></td></tr></table></body></html>`;
+
+  try {
+    const { error } = await r.emails.send({
+      from:    `${fromName} <${fromEmail}>`,
+      to:      email,
+      subject: `${name}, you've missed ${daysMissed} study days — let's get back on track!`,
+      html,
+    });
+    if (error) throw new Error(error.message);
+    logger.info('Inactivity email sent', { email, daysMissed });
+  } catch (err) {
+    logger.error('Failed to send inactivity email', { email, err: err.message });
+  }
+}
+
+/**
+ * 7-day admin alert — notifies admins + center manager about an inactive student.
+ */
+async function sendAdminInactivityAlert({ adminEmail, studentName, studentEmail, daysMissed, centerName }) {
+  const r = getResend();
+  if (!r || !adminEmail) return;
+
+  const fromName  = process.env.EMAIL_FROM_NAME  || 'NLTC Online';
+  const fromEmail = process.env.RESEND_FROM_EMAIL || 'no-reply@nltc.ng';
+
+  const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/>
+<title>Student Inactivity Alert</title></head>
+<body style="margin:0;padding:0;background:#f5f7fa;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f7fa;padding:32px 16px;"><tr><td align="center">
+<table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 32px rgba(0,0,0,.08);">
+  <tr><td style="background:#DC2626;padding:28px 40px;text-align:center;">
+    <p style="margin:0;font-size:32px;">⚠️</p>
+    <h1 style="margin:8px 0 0;color:#ffffff;font-size:20px;font-weight:900;">Student Inactivity Alert</h1>
+    <p style="margin:6px 0 0;color:rgba(255,255,255,.7);font-size:13px;">Action required — teacher follow-up needed</p>
+  </td></tr>
+  <tr><td style="padding:32px 40px;">
+    <p style="margin:0 0 20px;font-size:15px;color:#374151;line-height:1.7;">
+      The following student has been inactive on NLTC Online for <strong style="color:#DC2626;">${daysMissed} days</strong> and may need follow-up from their teacher.
+    </p>
+    <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px;border-radius:8px;border:1px solid #e5e7eb;overflow:hidden;">
+      <tr style="background:#f8f9fc;">
+        <td colspan="2" style="padding:10px 16px;font-size:12px;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:.08em;">Student Details</td>
+      </tr>
+      <tr style="border-top:1px solid #e5e7eb;"><td style="padding:11px 16px;font-size:13px;color:#6b7280;width:40%;">Name</td><td style="padding:11px 16px;font-size:13px;font-weight:700;color:#0B1D3A;">${studentName}</td></tr>
+      <tr style="border-top:1px solid #e5e7eb;background:#fafafa;"><td style="padding:11px 16px;font-size:13px;color:#6b7280;">Email</td><td style="padding:11px 16px;font-size:13px;color:#0B1D3A;">${studentEmail}</td></tr>
+      <tr style="border-top:1px solid #e5e7eb;"><td style="padding:11px 16px;font-size:13px;color:#6b7280;">Centre</td><td style="padding:11px 16px;font-size:13px;color:#0B1D3A;">${centerName || 'N/A'}</td></tr>
+      <tr style="border-top:1px solid #e5e7eb;background:#fafafa;"><td style="padding:11px 16px;font-size:13px;color:#6b7280;">Days Inactive</td><td style="padding:11px 16px;font-size:13px;font-weight:700;color:#DC2626;">${daysMissed} days</td></tr>
+    </table>
+    <p style="margin:0 0 16px;font-size:14px;color:#374151;line-height:1.7;">
+      Please reach out to this student directly to check in and encourage them to return to their studies.
+    </p>
+    <table cellpadding="0" cellspacing="0" style="margin:0 0 24px;">
+      <tr><td style="background:#0B1D3A;border-radius:8px;">
+        <a href="https://nltc.com.ng/admin" style="display:inline-block;padding:12px 28px;color:#D4A017;font-weight:800;font-size:14px;text-decoration:none;">
+          Open Admin Dashboard &rarr;
+        </a>
+      </td></tr>
+    </table>
+  </td></tr>
+  <tr><td style="background:#f8f9fc;padding:20px 40px;border-top:1px solid #e5e7eb;text-align:center;">
+    <p style="margin:0;font-size:12px;color:#9ca3af;">&copy; ${new Date().getFullYear()} NLTC Online &nbsp;&middot;&nbsp; Automated alert system</p>
+  </td></tr>
+</table></td></tr></table></body></html>`;
+
+  try {
+    const { error } = await r.emails.send({
+      from:    `${fromName} <${fromEmail}>`,
+      to:      adminEmail,
+      subject: `[NLTC Alert] ${studentName} has been inactive for ${daysMissed} days`,
+      html,
+    });
+    if (error) throw new Error(error.message);
+    logger.info('Admin inactivity alert sent', { adminEmail, studentEmail, daysMissed });
+  } catch (err) {
+    logger.error('Failed to send admin alert', { adminEmail, err: err.message });
+  }
+}
+
+module.exports = { sendWelcomeEmail, verifyTransporter, sendWeeklyProgressEmail, sendInactivityEmail, sendAdminInactivityAlert };

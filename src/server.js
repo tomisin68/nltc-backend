@@ -21,6 +21,8 @@ const scheduleRouter       = require('./routes/schedule');
 const settingsRouter       = require('./routes/settings');
 const centersRouter        = require('./routes/centers');
 const authCustomRouter     = require('./routes/authCustom');
+const { startWeeklyReportJob }    = require('./jobs/weeklyReport');
+const { startInactivityCheckJob } = require('./jobs/inactivityCheck');
 
 initFirebase();
 
@@ -119,6 +121,8 @@ app.use((err,_req,res,_next) => {
 
 app.listen(PORT, () => {
   logger.info('NLTC Backend started', { port:PORT, env:process.env.NODE_ENV||'development' });
+  startWeeklyReportJob();
+  startInactivityCheckJob();
 });
 
 module.exports = app;
