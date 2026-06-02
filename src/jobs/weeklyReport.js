@@ -29,6 +29,10 @@ async function runWeeklyReport() {
       const email = user.email;
       if (!email) continue;
 
+      // Only send to students who have paid (pro/elite plan OR lesson fee paid)
+      const isPaid = ['pro', 'elite'].includes(user.plan) || user.lessonFeePaid === true;
+      if (!isPaid) continue;
+
       try {
         // Fetch CBT sessions from last 7 days
         const resultsSnap = await db

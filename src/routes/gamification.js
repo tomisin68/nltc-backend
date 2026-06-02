@@ -56,6 +56,17 @@ function isYesterday(d) {
   return isSameDay(d, y);
 }
 
+// Returns the ISO date string (YYYY-MM-DD) of the most recent Monday (UTC)
+function getWeekStart() {
+  const now = new Date();
+  const day = now.getUTCDay(); // 0=Sun … 6=Sat
+  const daysBack = day === 0 ? 6 : day - 1;
+  const monday = new Date(now);
+  monday.setUTCDate(now.getUTCDate() - daysBack);
+  monday.setUTCHours(0, 0, 0, 0);
+  return monday.toISOString().slice(0, 10);
+}
+
 // ─── Achievement definitions (mirrors frontend ALL_ACHIEVEMENTS) ──────────────
 const ACHIEVEMENT_CHECKS = [
   { id: 'first_lesson', test: (_xp, _streak, _cbt, action) => action === 'watch_lesson' },
@@ -146,11 +157,18 @@ async function awardXP(uid, action, meta = {}) {
     }
     const newAchievements = allUnlocked.filter(id => !existing.includes(id));
 
+    // ── Weekly XP: reset on new week (Monday UTC), then add ─────────────
+    const currentWeekStart = getWeekStart();
+    const isNewWeek = (profile.weekStart || '') !== currentWeekStart;
+    const newWeeklyXp = (isNewWeek ? 0 : (profile.weeklyXp || 0)) + xpEarned;
+
     const updates = {
       xp:             newXP,
       streak,
       cbtCount:       newCbtCount,
       lastActivityAt: admin.firestore.FieldValue.serverTimestamp(),
+      weeklyXp:       newWeeklyXp,
+      weekStart:      currentWeekStart,
     };
     if (action === 'first_login') updates.firstLoginXpAwarded = true;
     if (newAchievements.length > 0) updates.achievements = allUnlocked;
@@ -159,7 +177,7 @@ async function awardXP(uid, action, meta = {}) {
 
     return {
       newXP, xpEarned, newStreak: streak, streakBonusAwarded, leveledUp,
-      newCbtCount, newAchievements,
+      newCbtCount, newAchievements, newWeeklyXp,
       ...levelInfo,
     };
   });
@@ -280,6 +298,44 @@ router.get(
 
     const myEntry = board.find(s => s.uid === req.user.uid);
     res.json({ success: true, leaderboard: board, myRank: myEntry?.rank ?? null });
+  }),
+);
+
+// ─── GET /gamification/leaderboard/weekly ────────────────────────────────────
+const weeklyCache = new Map(); // key: lim → { board, cachedAt }
+router.get(
+  '/leaderboard/weekly',
+  asyncHandler(async (req, res) => {
+    const db  = getDb();
+    const lim = Math.min(parseInt(req.query.limit || '10', 10), 20);
+    const now = Date.now();
+
+    const cached = weeklyCache.get(lim);
+    if (cached && now - cached.cachedAt < 60_000) {
+      const myEntry = cached.board.find(s => s.uid === req.user.uid);
+      return res.json({ success:true, leaderboard:cached.board, weekStart:getWeekStart(), myRank:myEntry?.rank ?? null });
+    }
+
+    const snap = await db.collection('users').orderBy('weeklyXp', 'desc').limit(lim + 10).get();
+    const board = snap.docs
+      .map(d => ({
+        uid:        d.id,
+        role:       d.data().role       || 'student',
+        firstName:  d.data().firstName  || '',
+        lastName:   d.data().lastName   || '',
+        state:      d.data().state      || '—',
+        targetExam: d.data().targetExam || '—',
+        weeklyXp:   d.data().weekStart === getWeekStart() ? (d.data().weeklyXp || 0) : 0,
+        xp:         d.data().xp         || 0,
+      }))
+      .filter(u => u.role !== 'admin' && u.role !== 'super_admin')
+      .sort((a, b) => b.weeklyXp - a.weeklyXp)
+      .slice(0, lim)
+      .map((u, i) => ({ ...u, rank: i + 1 }));
+
+    weeklyCache.set(lim, { board, cachedAt: now });
+    const myEntry = board.find(s => s.uid === req.user.uid);
+    res.json({ success:true, leaderboard:board, weekStart:getWeekStart(), myRank:myEntry?.rank ?? null });
   }),
 );
 

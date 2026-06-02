@@ -42,6 +42,10 @@ async function runInactivityCheck() {
       const user = userDoc.data();
       if (!user.email) continue;
 
+      // Only notify students who have paid (pro/elite plan OR lesson fee paid)
+      const isPaid = ['pro', 'elite'].includes(user.plan) || user.lessonFeePaid === true;
+      if (!isPaid) continue;
+
       const lastActivity = user.lastActivityAt?.toDate?.() ?? null;
       if (!lastActivity) continue;
 
