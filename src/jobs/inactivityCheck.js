@@ -17,6 +17,31 @@ function wasSentRecently(tsField) {
   return Date.now() - d.getTime() < GRACE_MS;
 }
 
+/**
+ * Returns true only if the student's payment is currently active.
+ * Checks both lesson-fee expiry AND Paystack plan expiry.
+ * A student whose payment has lapsed is treated as unpaid until re-activated.
+ */
+function isCurrentlyPaid(user, now) {
+  // 1. Active lesson fee (physical-centre students)
+  if (user.lessonFeePaid === true) {
+    const expTs = user.lessonFeeExpiresAt;
+    if (!expTs) return true; // no expiry stored → grandfathered/legacy, treat as active
+    const expDate = expTs.toDate ? expTs.toDate() : new Date(expTs);
+    if (expDate > now) return true; // fee still valid
+  }
+
+  // 2. Active Paystack subscription plan (online students)
+  if (['pro', 'elite'].includes(user.plan)) {
+    const expTs = user.planExpiresAt;
+    if (!expTs) return true; // no expiry → recurring subscription still active
+    const expDate = expTs.toDate ? expTs.toDate() : new Date(expTs);
+    if (expDate > now) return true; // plan still valid
+  }
+
+  return false;
+}
+
 async function runInactivityCheck() {
   const db  = getDb();
   const now = new Date();
@@ -42,9 +67,8 @@ async function runInactivityCheck() {
       const user = userDoc.data();
       if (!user.email) continue;
 
-      // Only notify students who have paid (pro/elite plan OR lesson fee paid)
-      const isPaid = ['pro', 'elite'].includes(user.plan) || user.lessonFeePaid === true;
-      if (!isPaid) continue;
+      // Only notify students whose payment is currently active (not expired)
+      if (!isCurrentlyPaid(user, now)) continue;
 
       const lastActivity = user.lastActivityAt?.toDate?.() ?? null;
       if (!lastActivity) continue;

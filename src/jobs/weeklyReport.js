@@ -5,6 +5,32 @@ const { getDb }                    = require('../../config/firebase');
 const { sendWeeklyProgressEmail }  = require('../services/emailService');
 const logger                       = require('../utils/logger');
 
+/**
+ * Returns true only if the student's payment is currently active.
+ * Checks both lesson-fee expiry AND Paystack plan expiry.
+ * A student whose payment has lapsed is treated as unpaid until re-activated.
+ */
+function isCurrentlyPaid(user, now) {
+  // 1. Active lesson fee (physical-centre students)
+  if (user.lessonFeePaid === true) {
+    const expTs = user.lessonFeeExpiresAt;
+    if (!expTs) return true; // no expiry stored → grandfathered/legacy, treat as active
+    const expDate = expTs.toDate ? expTs.toDate() : new Date(expTs);
+    if (expDate > now) return true; // fee still valid
+    // expDate <= now → fee has expired, fall through to check plan
+  }
+
+  // 2. Active Paystack subscription plan (online students)
+  if (['pro', 'elite'].includes(user.plan)) {
+    const expTs = user.planExpiresAt;
+    if (!expTs) return true; // no expiry → recurring subscription still active
+    const expDate = expTs.toDate ? expTs.toDate() : new Date(expTs);
+    if (expDate > now) return true; // plan still valid
+  }
+
+  return false;
+}
+
 async function runWeeklyReport() {
   const db  = getDb();
   const now = new Date();
@@ -29,9 +55,8 @@ async function runWeeklyReport() {
       const email = user.email;
       if (!email) continue;
 
-      // Only send to students who have paid (pro/elite plan OR lesson fee paid)
-      const isPaid = ['pro', 'elite'].includes(user.plan) || user.lessonFeePaid === true;
-      if (!isPaid) continue;
+      // Only email students whose payment is currently active (not expired)
+      if (!isCurrentlyPaid(user, now)) continue;
 
       try {
         // Fetch CBT sessions from last 7 days
