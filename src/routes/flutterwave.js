@@ -3,7 +3,7 @@ const { body, query }= require('express-validator');
 const { requireAuth }= require('../middleware/auth');
 const { validate }   = require('../middleware/validate');
 const { authLimiter }= require('../middleware/rateLimiter');
-const { initializePayment, verifyTransaction, validateWebhookSignature } = require('../services/paystackService');
+const { initializePayment, verifyTransaction, validateWebhookSignature } = require('../services/flutterwaveService');
 const asyncHandler   = require('../utils/asyncHandler');
 const logger         = require('../utils/logger');
 const { getDb }      = require('../../config/firebase');
@@ -14,10 +14,10 @@ async function upgradePlan(uid, plan, reference) {
   const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // exactly 30 days
   await getDb().collection('users').doc(uid).update({
     plan,
-    paystackRef:        reference,
-    planActivatedAt:    admin.firestore.FieldValue.serverTimestamp(),
-    planExpiresAt:      expiresAt,
-    updatedAt:          admin.firestore.FieldValue.serverTimestamp(),
+    paymentRef:      reference,
+    planActivatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    planExpiresAt:   expiresAt,
+    updatedAt:       admin.firestore.FieldValue.serverTimestamp(),
   });
 }
 
@@ -67,7 +67,7 @@ async function savePaymentRecord(uid, { reference, type, plan, amount, descripti
   }
 }
 
-// ─── POST /api/paystack/initialize ──────────────────────────────────────────
+// ─── POST /api/flutterwave/initialize ──────────────────────────────────────
 router.post('/initialize', authLimiter, requireAuth,
   [
     body('plan').optional().isIn(['pro', 'elite']),
@@ -120,12 +120,12 @@ router.post('/initialize', authLimiter, requireAuth,
       description,
     );
 
-    logger.info('Paystack checkout initialised', { uid, plan: req.body.plan, type: paymentType, amountKobo, description });
+    logger.info('Flutterwave checkout initialised', { uid, plan: req.body.plan, type: paymentType, amountKobo, description });
     res.json({ success: true, ...result });
   })
 );
 
-// ─── GET /api/paystack/verify ────────────────────────────────────────────────
+// ─── GET /api/flutterwave/verify ────────────────────────────────────────────
 router.get('/verify', requireAuth,
   [query('reference').notEmpty()],
   validate,
@@ -168,7 +168,7 @@ router.get('/verify', requireAuth,
   })
 );
 
-// ─── GET /api/paystack/history ───────────────────────────────────────────────
+// ─── GET /api/flutterwave/history ───────────────────────────────────────────
 router.get('/history', requireAuth, asyncHandler(async (req, res) => {
   const uid  = req.user.uid;
   const snap = await getDb()
@@ -181,13 +181,18 @@ router.get('/history', requireAuth, asyncHandler(async (req, res) => {
   res.json({ success: true, payments });
 }));
 
-// ─── GET /api/paystack/callback ─────────────────────────────────────────────
+// ─── GET /api/flutterwave/callback ──────────────────────────────────────────
 router.get('/callback', asyncHandler(async (req, res) => {
-  const reference  = req.query.reference;
+  const reference   = req.query.tx_ref || req.query.reference;
+  const fwStatus    = req.query.status; // "successful" | "cancelled" | "failed"
   const frontendUrl = process.env.FRONTEND_URL || 'https://nltc-online.vercel.app';
 
   if (!reference) {
     return res.redirect(`${frontendUrl}/payment/result?status=error&message=No+reference+returned`);
+  }
+
+  if (fwStatus === 'cancelled') {
+    return res.redirect(`${frontendUrl}/payment/result?status=cancelled&reference=${reference}`);
   }
 
   try {
@@ -235,81 +240,49 @@ router.get('/callback', asyncHandler(async (req, res) => {
   }
 }));
 
-// ─── POST /api/paystack/webhook ──────────────────────────────────────────────
+// ─── POST /api/flutterwave/webhook ──────────────────────────────────────────
 router.post('/webhook', asyncHandler(async (req, res) => {
-  if (!validateWebhookSignature(req.rawBody, req.headers['x-paystack-signature'])) {
-    logger.warn('Invalid Paystack webhook signature');
+  if (!validateWebhookSignature(req.rawBody, req.headers['verif-hash'])) {
+    logger.warn('Invalid Flutterwave webhook signature');
     return res.status(401).json({ error: 'Invalid signature' });
   }
 
   res.status(200).json({ received: true });
 
   const event = req.body;
-  logger.info(`Paystack webhook received: ${event.event}`);
+  logger.info(`Flutterwave webhook received: ${event.event}`);
 
   try {
-    switch (event.event) {
+    if (event.event === 'charge.completed') {
+      const data   = event.data || {};
+      const meta   = data.meta || {};
+      const uid    = meta.uid;
+      const plan   = meta.plan;
+      const type   = meta.type;
+      const amount = meta.amount || Math.round((data.amount || 0));
 
-      case 'charge.success': {
-        const { metadata, reference } = event.data;
-        const uid    = metadata?.uid;
-        const plan   = metadata?.plan;
-        const type   = metadata?.type;
-        const amount = metadata?.amount || Math.round((event.data.amount || 0) / 100);
-
-        if (uid && plan && type !== 'lesson_fee') {
-          await upgradePlan(uid, plan, reference);
-          await savePaymentRecord(uid, {
-            reference, type: 'plan_upgrade', plan, amount,
-            description: `${plan} plan upgrade`, status: 'success',
-          });
-          logger.info('Plan upgraded via webhook (charge.success)', { uid, plan });
-        } else if (uid && type === 'lesson_fee') {
-          await markLessonFeePaid(uid);
-          await savePaymentRecord(uid, {
-            reference, type: 'lesson_fee', amount,
-            description: metadata?.description || 'Lesson fee payment', status: 'success',
-          });
-          logger.info('Lesson fee paid via webhook (charge.success)', { uid });
-        }
-        break;
+      if (data.status !== 'successful') {
+        logger.info('Ignoring non-successful charge.completed webhook', { reference: data.tx_ref, status: data.status });
+        return;
       }
 
-      case 'subscription.create': {
-        const { metadata } = event.data || {};
-        if (metadata?.uid && metadata?.plan) {
-          await upgradePlan(metadata.uid, metadata.plan, event.data.subscription_code);
-          logger.info('Plan activated via webhook (subscription.create)', { uid: metadata.uid, plan: metadata.plan });
-        }
-        break;
+      if (uid && plan && type !== 'lesson_fee') {
+        await upgradePlan(uid, plan, data.tx_ref);
+        await savePaymentRecord(uid, {
+          reference: data.tx_ref, type: 'plan_upgrade', plan, amount,
+          description: `${plan} plan upgrade`, status: 'success',
+        });
+        logger.info('Plan upgraded via webhook (charge.completed)', { uid, plan });
+      } else if (uid && type === 'lesson_fee') {
+        await markLessonFeePaid(uid);
+        await savePaymentRecord(uid, {
+          reference: data.tx_ref, type: 'lesson_fee', amount,
+          description: meta.description || 'Lesson fee payment', status: 'success',
+        });
+        logger.info('Lesson fee paid via webhook (charge.completed)', { uid });
       }
-
-      case 'subscription.disable': {
-        const uid = event.data?.metadata?.uid || event.data?.customer?.metadata?.uid;
-        if (uid) {
-          await getDb().collection('users').doc(uid).update({
-            plan:      'free',
-            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-          });
-          logger.info('Plan downgraded via webhook (subscription.disable)', { uid });
-        }
-        break;
-      }
-
-      case 'invoice.payment_failed': {
-        const uid = event.data?.metadata?.uid || event.data?.customer?.metadata?.uid;
-        if (uid) {
-          await getDb().collection('users').doc(uid).update({
-            plan:      'free',
-            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-          });
-          logger.warn('Plan downgraded — invoice payment failed', { uid });
-        }
-        break;
-      }
-
-      default:
-        logger.info(`Unhandled Paystack event: ${event.event}`);
+    } else {
+      logger.info(`Unhandled Flutterwave event: ${event.event}`);
     }
   } catch (err) {
     logger.error('Webhook processing error', { event: event.event, error: err.message });

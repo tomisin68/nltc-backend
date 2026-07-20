@@ -7,7 +7,7 @@ const logger                       = require('../utils/logger');
 
 /**
  * Returns true only if the student's payment is currently active.
- * Checks both lesson-fee expiry AND Paystack plan expiry.
+ * Checks both lesson-fee expiry AND Flutterwave plan expiry.
  * A student whose payment has lapsed is treated as unpaid until re-activated.
  */
 function isCurrentlyPaid(user, now) {
@@ -20,7 +20,7 @@ function isCurrentlyPaid(user, now) {
     // expDate <= now → fee has expired, fall through to check plan
   }
 
-  // 2. Active Paystack subscription plan (online students)
+  // 2. Active Flutterwave subscription plan (online students)
   if (['pro', 'elite'].includes(user.plan)) {
     const expTs = user.planExpiresAt;
     if (!expTs) return true; // no expiry → recurring subscription still active

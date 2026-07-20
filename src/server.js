@@ -9,7 +9,7 @@ const logger                             = require('./utils/logger');
 const healthRouter         = require('./routes/health');
 const gamificationRouter   = require('./routes/gamification');
 const agoraRouter          = require('./routes/agora');
-const paystackRouter       = require('./routes/paystack');
+const flutterwaveRouter    = require('./routes/flutterwave');
 const liveRouter           = require('./routes/live');
 const notificationsRouter  = require('./routes/notifications');
 const cbtRouter            = require('./routes/cbt');
@@ -77,9 +77,9 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 
-// Raw body for Paystack webhook
+// Raw body for Flutterwave webhook
 app.use((req,_res,next) => {
-  if (req.path==='/api/paystack/webhook') {
+  if (req.path==='/api/flutterwave/webhook') {
     let data='';
     req.setEncoding('utf8');
     req.on('data',chunk=>{ data+=chunk; });
@@ -98,8 +98,8 @@ app.use('/api/', generalLimiter);
 app.use('/api/health',         healthRouter);
 app.use('/api/gamification',   gamificationRouter);
 app.use('/api/agora',          agoraRouter);
-app.use('/api/paystack',       paystackRouter);
-app.use('/payment',            paystackRouter);  // Paystack callback redirect
+app.use('/api/flutterwave',    flutterwaveRouter);
+app.use('/payment',            flutterwaveRouter);  // Flutterwave callback redirect
 app.use('/api/live',           liveRouter);
 app.use('/api/notifications',  notificationsRouter);
 app.use('/api/cbt',            cbtRouter);
