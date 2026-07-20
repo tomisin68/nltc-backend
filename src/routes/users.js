@@ -7,6 +7,7 @@ const { getDb }                = require('../../config/firebase');
 const { sendInAppNotification, sendPushToTokens } = require('../services/notificationService');
 const { sendWelcomeEmail, verifyTransporter } = require('../services/emailService');
 const { requireAdmin } = require('../middleware/auth');
+const { EMAILS_ENABLED } = require('../config/emailConfig');
 
 const router = express.Router();
 
@@ -160,7 +161,7 @@ router.post('/create-admin', requireAdmin, asyncHandler(async (req, res) => {
 
   // Email credentials
   const { Resend } = require('resend');
-  if (process.env.RESEND_API_KEY) {
+  if (EMAILS_ENABLED && process.env.RESEND_API_KEY) {
     try {
       const resend     = new Resend(process.env.RESEND_API_KEY);
       const fromName   = process.env.EMAIL_FROM_NAME  || 'NLTC Online';

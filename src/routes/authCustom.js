@@ -5,6 +5,7 @@ const asyncHandler = require('../utils/asyncHandler');
 const logger       = require('../utils/logger');
 const { getDb, getAuth } = require('../../config/firebase');
 const { Resend }   = require('resend');
+const { EMAILS_ENABLED } = require('../config/emailConfig');
 
 const router = express.Router();
 
@@ -106,6 +107,11 @@ router.post('/request-password-reset', asyncHandler(async (req, res) => {
           <p style="margin:0;font-size:12px;color:#9ca3af;word-break:break-all;">Or copy this link: ${resetLink}</p>`,
       });
 
+      if (!EMAILS_ENABLED) {
+        logger.info('Email sending disabled — skipped password reset email', { uid, email });
+        return;
+      }
+
       await resend().emails.send({
         from:    `${FROM_NAME} <${FROM_EMAIL}>`,
         to:      email.trim(),
@@ -180,14 +186,17 @@ router.post('/send-otp', asyncHandler(async (req, res) => {
       <p style="margin:0;font-size:13px;color:#6b7280;">If you did not create an NLTC Online account, ignore this email.</p>`,
   });
 
-  await resend().emails.send({
-    from:    `${FROM_NAME} <${FROM_EMAIL}>`,
-    to:      email,
-    subject: `${otp} is your NLTC Online verification code`,
-    html,
-  });
-
-  logger.info('OTP sent', { uid, email });
+  if (EMAILS_ENABLED) {
+    await resend().emails.send({
+      from:    `${FROM_NAME} <${FROM_EMAIL}>`,
+      to:      email,
+      subject: `${otp} is your NLTC Online verification code`,
+      html,
+    });
+    logger.info('OTP sent', { uid, email });
+  } else {
+    logger.info('Email sending disabled — skipped OTP email', { uid, email });
+  }
   res.json({ success: true });
 }));
 
@@ -248,14 +257,17 @@ router.post('/resend-otp', asyncHandler(async (req, res) => {
       </div>`,
   });
 
-  await resend().emails.send({
-    from: `${FROM_NAME} <${FROM_EMAIL}>`,
-    to:   email,
-    subject: `${otp} is your NLTC Online verification code`,
-    html,
-  });
-
-  logger.info('OTP resent', { uid, email });
+  if (EMAILS_ENABLED) {
+    await resend().emails.send({
+      from: `${FROM_NAME} <${FROM_EMAIL}>`,
+      to:   email,
+      subject: `${otp} is your NLTC Online verification code`,
+      html,
+    });
+    logger.info('OTP resent', { uid, email });
+  } else {
+    logger.info('Email sending disabled — skipped OTP resend email', { uid, email });
+  }
   res.json({ success: true });
 }));
 

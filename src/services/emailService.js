@@ -1,9 +1,14 @@
 const { Resend } = require('resend');
 const logger     = require('../utils/logger');
+const { EMAILS_ENABLED } = require('../config/emailConfig');
 
 let resend = null;
 
 function getResend() {
+  if (!EMAILS_ENABLED) {
+    logger.info('Email sending disabled (EMAILS_ENABLED=false) — skipping');
+    return null;
+  }
   if (resend) return resend;
   const key = process.env.RESEND_API_KEY;
   if (!key) {
