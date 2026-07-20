@@ -32,7 +32,7 @@ function isCurrentlyPaid(user, now) {
   }
 
   // 2. Active Flutterwave subscription plan (online students)
-  if (['pro', 'elite'].includes(user.plan)) {
+  if (user.plan === 'pro') {
     const expTs = user.planExpiresAt;
     if (!expTs) return true; // no expiry → recurring subscription still active
     const expDate = expTs.toDate ? expTs.toDate() : new Date(expTs);

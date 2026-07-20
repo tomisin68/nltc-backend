@@ -5,8 +5,7 @@ const SECRET_KEY   = process.env.FLUTTERWAVE_SECRET_KEY;
 const SECRET_HASH  = process.env.FLUTTERWAVE_SECRET_HASH;
 
 const PLAN_LABELS = {
-  pro:   process.env.PLAN_PRO_LABEL   || 'Pro Scholar',
-  elite: process.env.PLAN_ELITE_LABEL || 'Elite Bundle',
+  pro: process.env.PLAN_PRO_LABEL || 'Pro Scholar',
 };
 
 const api = axios.create({
@@ -21,7 +20,7 @@ function generateTxRef(uid) {
 
 /**
  * @param {string} email
- * @param {string|null} planKey    - 'pro' | 'elite' | null (for lesson_fee)
+ * @param {string|null} planKey    - 'pro' | null (for lesson_fee)
  * @param {string} uid             - Firebase UID
  * @param {string} callbackUrl
  * @param {number} amountKobo      - Amount in kobo (100 kobo = ₦1); Flutterwave itself is billed in Naira

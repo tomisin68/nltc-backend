@@ -7,8 +7,7 @@ const { getDb }    = require('../../config/firebase');
 const router = express.Router();
 
 const DEFAULTS = {
-  proMonthly:        5000,
-  eliteMonthly:      10000,
+  proMonthly:        2000,
   lessonFeeDefault:  5000,
 };
 
@@ -36,11 +35,10 @@ router.get('/fees', asyncHandler(async (req, res) => {
 
 // ─── POST /api/settings/fees (admin only) ────────────────────────────────────
 router.post('/fees', requireAdmin, asyncHandler(async (req, res) => {
-  const { proMonthly, eliteMonthly, lessonFeeDefault } = req.body;
+  const { proMonthly, lessonFeeDefault } = req.body;
 
   const updates = {};
   if (proMonthly       != null) updates.proMonthly       = Number(proMonthly);
-  if (eliteMonthly     != null) updates.eliteMonthly     = Number(eliteMonthly);
   if (lessonFeeDefault != null) updates.lessonFeeDefault = Number(lessonFeeDefault);
 
   if (!Object.keys(updates).length) {

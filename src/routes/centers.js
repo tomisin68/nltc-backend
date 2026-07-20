@@ -167,7 +167,7 @@ router.get('/:id/stats', requireAuth, asyncHandler(async (req, res) => {
     .get();
 
   const students = studentsSnap.docs.map(d => d.data());
-  const PLAN_PRICE = { free: 0, pro: 2000, elite: 5000 };
+  const PLAN_PRICE = { free: 0, pro: 2000 };
   const revenue = students.reduce((sum, s) => sum + (PLAN_PRICE[s.plan] || 0), 0);
 
   res.json({

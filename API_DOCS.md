@@ -361,7 +361,7 @@ POST /api/paystack/initialize
 
 | Field | Type | Required | Values |
 |---|---|---|---|
-| `plan` | string | ✅ | `"pro"` or `"elite"` |
+| `plan` | string | ✅ | `"pro"` |
 | `callbackUrl` | string | ✅ | Full URL Paystack redirects to after payment |
 
 **Response**
@@ -379,7 +379,6 @@ POST /api/paystack/initialize
 | Plan | Amount |
 |---|---|
 | `pro` | ₦2,000 |
-| `elite` | ₦5,000 |
 
 **Example — upgrade button handler**
 ```js
@@ -405,7 +404,6 @@ async function startUpgrade(plan) {
 
 // Attach to your upgrade buttons
 document.getElementById('btnUpgradePro').addEventListener('click', () => startUpgrade('pro'));
-document.getElementById('btnUpgradeElite').addEventListener('click', () => startUpgrade('elite'));
 ```
 
 ---
@@ -485,7 +483,7 @@ GET /payment/callback?reference=<reference>
 // On your /payment/result page — read the query params
 const params = new URLSearchParams(window.location.search);
 const status    = params.get('status');    // "success" | "failed" | "error"
-const plan      = params.get('plan');      // "pro" | "elite"
+const plan      = params.get('plan');      // "pro"
 const reference = params.get('reference');
 const message   = params.get('message');
 

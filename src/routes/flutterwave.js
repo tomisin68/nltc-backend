@@ -70,7 +70,7 @@ async function savePaymentRecord(uid, { reference, type, plan, amount, descripti
 // ─── POST /api/flutterwave/initialize ──────────────────────────────────────
 router.post('/initialize', authLimiter, requireAuth,
   [
-    body('plan').optional().isIn(['pro', 'elite']),
+    body('plan').optional().isIn(['pro']),
     body('callbackUrl').isURL(),
     body('type').optional().isIn(['plan_upgrade', 'lesson_fee']),
     body('amount').optional().isInt({ min: 1 }),
@@ -97,8 +97,7 @@ router.post('/initialize', authLimiter, requireAuth,
 
     const fees = feesSnap.exists ? feesSnap.data() : {};
     const planAmounts = {
-      pro:   (fees.proMonthly   || 5000)  * 100,
-      elite: (fees.eliteMonthly || 10000) * 100,
+      pro: (fees.proMonthly || 2000) * 100,
     };
 
     const amountKobo = paymentType === 'lesson_fee'

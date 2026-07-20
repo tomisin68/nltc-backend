@@ -138,7 +138,7 @@ Returns: { token, channelName, uid, appId, expiresAt }
 ```
 POST /api/paystack/initialize
 Headers: Authorization: Bearer <token>
-Body: { "plan": "pro" | "elite", "callbackUrl": "https://yoursite.com/payment-success" }
+Body: { "plan": "pro", "callbackUrl": "https://yoursite.com/payment-success" }
 Returns: { authorizationUrl, accessCode, reference }
 
 GET /api/paystack/verify?reference=xxx

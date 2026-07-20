@@ -20,7 +20,7 @@ async function sendInAppNotification(uid, { title, body, type, data, iconEmoji }
 /**
  * Broadcast an in-app notification to multiple users.
  *
- * filter: 'all' | 'pro' | 'free' | 'elite'
+ * filter: 'all' | 'pro' | 'free'
  *   'all'   → all documents in users collection (students)
  *   others  → filtered by plan field
  */
@@ -29,7 +29,6 @@ async function broadcastInAppNotification({ filter, title, body, type, data, ico
   let q = db.collection('users');
   if (filter === 'pro')   q = q.where('plan', '==', 'pro');
   if (filter === 'free')  q = q.where('plan', '==', 'free');
-  if (filter === 'elite') q = q.where('plan', '==', 'elite');
   // 'all' → no extra filter
 
   const snap = await q.get();

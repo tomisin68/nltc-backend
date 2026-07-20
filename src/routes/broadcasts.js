@@ -15,7 +15,6 @@ const router = express.Router();
 function toFilter(sentTo) {
   if (sentTo === 'Pro Users Only')   return 'pro';
   if (sentTo === 'Free Users Only')  return 'free';
-  if (sentTo === 'Elite Users Only') return 'elite';
   return 'all';
 }
 
@@ -63,7 +62,6 @@ router.post('/create', requireAdmin, asyncHandler(async (req, res) => {
   let q = db.collection('users');
   if (filter === 'pro')   q = q.where('plan', '==', 'pro');
   if (filter === 'free')  q = q.where('plan', '==', 'free');
-  if (filter === 'elite') q = q.where('plan', '==', 'elite');
 
   q.get()
     .then(async snap => {

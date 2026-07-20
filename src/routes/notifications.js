@@ -235,7 +235,6 @@ router.post('/send', requireAdmin, asyncHandler(async (req, res) => {
     let q = db.collection('users');
     if (target === 'pro')   q = q.where('plan', '==', 'pro');
     if (target === 'free')  q = q.where('plan', '==', 'free');
-    if (target === 'elite') q = q.where('plan', '==', 'elite');
     // 'all' → no extra filter
 
     const snap = await q.get();
@@ -246,7 +245,7 @@ router.post('/send', requireAdmin, asyncHandler(async (req, res) => {
 
   // Also write in-app notification for segment sends
   if (!target?.startsWith('uid:')) {
-    const filter = ['pro','free','elite'].includes(target) ? target : 'all';
+    const filter = ['pro','free'].includes(target) ? target : 'all';
     broadcastInAppNotification({
       filter,
       title,
