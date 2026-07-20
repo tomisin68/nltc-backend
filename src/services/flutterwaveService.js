@@ -12,6 +12,7 @@ const PLAN_LABELS = {
 const api = axios.create({
   baseURL: 'https://api.flutterwave.com/v3',
   headers: { Authorization: `Bearer ${SECRET_KEY}`, 'Content-Type': 'application/json' },
+  timeout: 15000,
 });
 
 function generateTxRef(uid) {
