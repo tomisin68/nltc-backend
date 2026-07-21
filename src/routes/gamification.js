@@ -316,7 +316,15 @@ router.get(
       return res.json({ success:true, leaderboard:cached.board, weekStart:getWeekStart(), myRank:myEntry?.rank ?? null });
     }
 
-    const snap = await db.collection('users').orderBy('weeklyXp', 'desc').limit(lim + 10).get();
+    // Only users who've earned XP THIS week have an up-to-date weeklyXp value —
+    // it's reset lazily inside awardXP(), not by a scheduled job — so filter on
+    // weekStart before ordering, otherwise stale prior-week values (which can be
+    // large) crowd out this week's real leaders from the top-N query window.
+    const snap = await db.collection('users')
+      .where('weekStart', '==', getWeekStart())
+      .orderBy('weeklyXp', 'desc')
+      .limit(lim + 10)
+      .get();
     const board = snap.docs
       .map(d => ({
         uid:        d.id,
@@ -325,7 +333,7 @@ router.get(
         lastName:   d.data().lastName   || '',
         state:      d.data().state      || '—',
         targetExam: d.data().targetExam || '—',
-        weeklyXp:   d.data().weekStart === getWeekStart() ? (d.data().weeklyXp || 0) : 0,
+        weeklyXp:   d.data().weeklyXp   || 0,
         xp:         d.data().xp         || 0,
       }))
       .filter(u => u.role !== 'admin' && u.role !== 'super_admin')
