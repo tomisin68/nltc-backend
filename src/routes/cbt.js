@@ -1,6 +1,9 @@
 const express        = require('express');
 const admin          = require('firebase-admin');
+const axios          = require('axios');
+const { body }       = require('express-validator');
 const { requireAuth, requireAdmin } = require('../middleware/auth');
+const { validate }   = require('../middleware/validate');
 const asyncHandler   = require('../utils/asyncHandler');
 const logger         = require('../utils/logger');
 const { getDb }      = require('../../config/firebase');
@@ -120,6 +123,50 @@ router.post('/submit', requireAuth, asyncHandler(async (req, res) => {
 
   res.json({ score, correct, total, timeTaken: timeTaken || 0, xpEarned, breakdown, resultId: resultRef.id });
 }));
+
+// ─── POST /api/cbt/record-answers ────────────────────────────────────────────
+// Logs per-question answers for the smart learning engine (nltc-ml). Writes a
+// durable raw log synchronously (so nothing is lost), then fire-and-forgets a
+// scoring call to nltc-ml — this must never block or fail the exam-submission
+// flow, so the ML call's outcome is deliberately not awaited into the response.
+router.post(
+  '/record-answers',
+  requireAuth,
+  [
+    body('answers').isArray({ min: 1 }).withMessage('answers must be a non-empty array'),
+    body('answers.*.questionId').isString().notEmpty(),
+    body('answers.*.subject').isString().notEmpty(),
+    body('answers.*.topic').optional({ nullable: true }).isString(),
+    body('answers.*.difficultyLabel').optional({ nullable: true }).isString(),
+    body('answers.*.correct').isBoolean(),
+  ],
+  validate,
+  asyncHandler(async (req, res) => {
+    const db  = getDb();
+    const uid = req.user.uid;
+
+    const batchRef = await db.collection('interactionBatches').add({
+      uid,
+      answers:     req.body.answers,
+      processed:   false,
+      submittedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    res.json({ success: true });
+
+    if (process.env.ML_SERVICE_URL) {
+      axios.post(
+        `${process.env.ML_SERVICE_URL}/internal/score`,
+        { uid, batchId: batchRef.id, answers: req.body.answers },
+        { headers: { 'X-Internal-Key': process.env.ML_INTERNAL_KEY }, timeout: 5000 },
+      ).catch(err => {
+        logger.warn('nltc-ml scoring call failed (will be caught by nightly reconciliation)', {
+          uid, batchId: batchRef.id, error: err.message,
+        });
+      });
+    }
+  }),
+);
 
 // ─── GET /api/cbt/scores (admin) ─────────────────────────────────────────────
 // Returns CBT results across all students (or a single student).
