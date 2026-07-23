@@ -152,6 +152,28 @@ router.post(
       submittedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
+    // Maintain the seen-question map on users/{uid}/ml/profile directly.
+    // The dashboard's Subject Coverage card and the adaptive question ranker
+    // both read seenQuestions from this doc; nltc-ml (when deployed) only
+    // adds Elo/BKT fields on top, so this merge is safe either way.
+    try {
+      const seenUpdate = {};
+      for (const a of req.body.answers) {
+        seenUpdate[a.questionId] = {
+          seenCount:  admin.firestore.FieldValue.increment(1),
+          lastSeenAt: admin.firestore.FieldValue.serverTimestamp(),
+        };
+      }
+      await db.collection('users').doc(uid).collection('ml').doc('profile').set({
+        seenQuestions: seenUpdate,
+        seenUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+    } catch (err) {
+      logger.warn('seenQuestions merge failed (coverage may lag until next session)', {
+        uid, error: err.message,
+      });
+    }
+
     res.json({ success: true });
 
     if (process.env.ML_SERVICE_URL) {
