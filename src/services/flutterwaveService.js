@@ -26,8 +26,9 @@ function generateTxRef(uid) {
  * @param {number} amountKobo      - Amount in kobo (100 kobo = ₦1); Flutterwave itself is billed in Naira
  * @param {string} [type]          - 'plan_upgrade' | 'lesson_fee'
  * @param {string} [description]   - Human-readable label (class name for lesson_fee, plan label for upgrades)
+ * @param {object} [extraMeta]     - Extra key/values echoed back on verify (e.g. classId, classType)
  */
-async function initializePayment(email, planKey, uid, callbackUrl, amountKobo, type = 'plan_upgrade', description = null) {
+async function initializePayment(email, planKey, uid, callbackUrl, amountKobo, type = 'plan_upgrade', description = null, extraMeta = {}) {
   if (!amountKobo || amountKobo <= 0) throw new Error('amountKobo must be a positive number');
 
   const amountNaira  = Math.round(amountKobo / 100);
@@ -42,6 +43,7 @@ async function initializePayment(email, planKey, uid, callbackUrl, amountKobo, t
     customer:     { email },
     customizations: { title: 'NLTC Online', description: displayLabel },
     meta: {
+      ...Object.fromEntries(Object.entries(extraMeta).filter(([, v]) => v != null)),
       uid,
       plan:        planKey  || null,
       type,

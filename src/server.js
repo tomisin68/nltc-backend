@@ -23,6 +23,7 @@ const centersRouter        = require('./routes/centers');
 const authCustomRouter     = require('./routes/authCustom');
 const { startWeeklyReportJob }    = require('./jobs/weeklyReport');
 const { startInactivityCheckJob } = require('./jobs/inactivityCheck');
+const { startAccessExpiryJob }    = require('./jobs/accessExpiry');
 
 initFirebase();
 
@@ -123,6 +124,7 @@ app.listen(PORT, () => {
   logger.info('NLTC Backend started', { port:PORT, env:process.env.NODE_ENV||'development' });
   startWeeklyReportJob();
   startInactivityCheckJob();
+  startAccessExpiryJob();
 });
 
 module.exports = app;

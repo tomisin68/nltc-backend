@@ -21,15 +21,26 @@ async function upgradePlan(uid, plan, reference) {
   });
 }
 
-async function markLessonFeePaid(uid) {
+async function markLessonFeePaid(uid, meta = {}) {
   const now       = new Date();
   const expiresAt = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000); // 30 days
-  await getDb().collection('users').doc(uid).update({
+  const patch = {
     lessonFeePaid:      true,
     lessonFeePaidAt:    admin.firestore.Timestamp.fromDate(now),
     lessonFeeExpiresAt: admin.firestore.Timestamp.fromDate(expiresAt),
+    // The lesson fee is what unlocks the platform, so grant the plan on the
+    // same dated window. Without an expiry a 'pro' plan would outlive the fee
+    // and the account would never lock again.
+    plan:               'pro',
+    planActivatedAt:    admin.firestore.Timestamp.fromDate(now),
+    planExpiresAt:      admin.firestore.Timestamp.fromDate(expiresAt),
     updatedAt:          admin.firestore.FieldValue.serverTimestamp(),
-  });
+  };
+  // Remember which class was paid for, so admin fee views show the right amount
+  if (meta.classId)   patch.classId   = meta.classId;
+  if (meta.className) patch.className = meta.className;
+  if (meta.classType) patch.classType = meta.classType;
+  await getDb().collection('users').doc(uid).update(patch);
 }
 
 function buildPeriodMeta() {
@@ -117,6 +128,9 @@ router.post('/initialize', authLimiter, requireAuth,
       amountKobo,
       paymentType,
       description,
+      paymentType === 'lesson_fee'
+        ? { classId: req.body.metadata?.classId, classType: req.body.metadata?.classType, className: req.body.metadata?.className }
+        : {},
     );
 
     logger.info('Flutterwave checkout initialised', { uid, plan: req.body.plan, type: paymentType, amountKobo, description });
@@ -141,7 +155,7 @@ router.get('/verify', requireAuth,
     }
 
     if (type === 'lesson_fee') {
-      await markLessonFeePaid(uid);
+      await markLessonFeePaid(uid, tx.metadata || {});
       await savePaymentRecord(uid, {
         reference:   tx.reference,
         type:        'lesson_fee',
@@ -216,7 +230,7 @@ router.get('/callback', asyncHandler(async (req, res) => {
       });
       logger.info('Plan upgraded via callback', { uid, plan });
     } else if (uid && type === 'lesson_fee') {
-      await markLessonFeePaid(uid);
+      await markLessonFeePaid(uid, tx.metadata || {});
       await savePaymentRecord(uid, {
         reference:   tx.reference,
         type:        'lesson_fee',
@@ -273,7 +287,7 @@ router.post('/webhook', asyncHandler(async (req, res) => {
         });
         logger.info('Plan upgraded via webhook (charge.completed)', { uid, plan });
       } else if (uid && type === 'lesson_fee') {
-        await markLessonFeePaid(uid);
+        await markLessonFeePaid(uid, meta);
         await savePaymentRecord(uid, {
           reference: data.tx_ref, type: 'lesson_fee', amount,
           description: meta.description || 'Lesson fee payment', status: 'success',
