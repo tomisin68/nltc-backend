@@ -37,6 +37,20 @@ router.post('/on-signup', requireAuth, asyncHandler(async (req, res) => {
   const protectedRoles = ['admin', 'super_admin', 'teacher', 'center_manager'];
   const assignedRole = protectedRoles.includes(existingRole) ? existingRole : 'student';
 
+  // Every new account gets a 3-day free trial. The frontend writes trialEndsAt
+  // at sign-up too; this is the backstop for when that client write never lands
+  // (rules error, tab closed mid-signup), which would otherwise leave the
+  // student with no trial and no way to get one. Never re-issued: an account
+  // that already carries a trialEndsAt keeps the one it has.
+  const TRIAL_DAYS = 3;
+  const trialPatch = existing.exists && existing.data().trialEndsAt
+    ? {}
+    : {
+        trialEndsAt: admin.firestore.Timestamp.fromMillis(
+          Date.now() + TRIAL_DAYS * 24 * 60 * 60 * 1000
+        ),
+      };
+
   // 2. Create / merge the user document
   await db.collection('users').doc(uid).set(
     {
@@ -55,6 +69,7 @@ router.post('/on-signup', requireAuth, asyncHandler(async (req, res) => {
       totalCorrect: 0,
       achievements: [],
       fcmTokens:    [],
+      ...trialPatch,
       createdAt:    admin.firestore.FieldValue.serverTimestamp(),
       updatedAt:    admin.firestore.FieldValue.serverTimestamp(),
     },
