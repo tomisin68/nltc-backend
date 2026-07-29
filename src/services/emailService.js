@@ -1,12 +1,12 @@
 const { Resend } = require('resend');
 const logger     = require('../utils/logger');
-const { EMAILS_ENABLED } = require('../config/emailConfig');
+const { EMAILS_ENABLED, ADMIN_EMAILS_ENABLED } = require('../config/emailConfig');
 
 let resend = null;
 
-function getResend() {
-  if (!EMAILS_ENABLED) {
-    logger.info('Email sending disabled (EMAILS_ENABLED=false) — skipping');
+function getResend(enabled) {
+  if (!enabled) {
+    logger.info('Email sending disabled — skipping');
     return null;
   }
   if (resend) return resend;
@@ -20,7 +20,7 @@ function getResend() {
 }
 
 async function verifyTransporter() {
-  const r = getResend();
+  const r = getResend(EMAILS_ENABLED);
   if (!r) return false;
   // Resend has no verify() call — confirm the key exists and looks valid
   const key = process.env.RESEND_API_KEY || '';
@@ -177,7 +177,7 @@ function buildWelcomeHtml(firstName) {
 async function sendWelcomeEmail({ email, firstName }) {
   if (!email) { logger.warn('sendWelcomeEmail: no email provided'); return; }
 
-  const r = getResend();
+  const r = getResend(EMAILS_ENABLED);
   if (!r) { logger.warn('sendWelcomeEmail: Resend client not available — check RESEND_API_KEY'); return; }
 
   const fromName  = process.env.EMAIL_FROM_NAME || 'Samuel Olusanya — NLTC Online';
@@ -201,7 +201,7 @@ async function sendWelcomeEmail({ email, firstName }) {
  * Weekly progress report email — sent every Sunday to student (+ parent if set).
  */
 async function sendWeeklyProgressEmail({ email, firstName, stats, parentEmail }) {
-  const r = getResend();
+  const r = getResend(EMAILS_ENABLED);
   if (!r || !email) return;
 
   const fromName  = process.env.EMAIL_FROM_NAME  || 'NLTC Online';
@@ -314,7 +314,7 @@ async function sendWeeklyProgressEmail({ email, firstName, stats, parentEmail })
  * 3-day inactivity nudge — sent to the student.
  */
 async function sendInactivityEmail({ email, firstName, daysMissed }) {
-  const r = getResend();
+  const r = getResend(EMAILS_ENABLED);
   if (!r || !email) return;
 
   const fromName  = process.env.EMAIL_FROM_NAME  || 'NLTC Online';
@@ -373,7 +373,7 @@ async function sendInactivityEmail({ email, firstName, daysMissed }) {
  * 7-day admin alert — notifies admins + center manager about an inactive student.
  */
 async function sendAdminInactivityAlert({ adminEmail, studentName, studentEmail, daysMissed, centerName }) {
-  const r = getResend();
+  const r = getResend(ADMIN_EMAILS_ENABLED);
   if (!r || !adminEmail) return;
 
   const fromName  = process.env.EMAIL_FROM_NAME  || 'NLTC Online';

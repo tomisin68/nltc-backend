@@ -4,7 +4,7 @@ const { requireSuperAdmin } = require('../middleware/auth');
 const asyncHandler   = require('../utils/asyncHandler');
 const logger         = require('../utils/logger');
 const { getDb, getAuth } = require('../../config/firebase');
-const { EMAILS_ENABLED } = require('../config/emailConfig');
+const { ADMIN_EMAILS_ENABLED } = require('../config/emailConfig');
 
 const router = express.Router();
 
@@ -85,7 +85,7 @@ router.post('/add', asyncHandler(async (req, res) => {
   );
 
   // Send welcome email if Resend is configured
-  if (EMAILS_ENABLED && process.env.RESEND_API_KEY) {
+  if (ADMIN_EMAILS_ENABLED && process.env.RESEND_API_KEY) {
     try {
       const { Resend } = require('resend');
       const resend = new Resend(process.env.RESEND_API_KEY);
