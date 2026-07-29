@@ -85,6 +85,7 @@ router.post('/initialize', authLimiter, requireAuth,
     body('callbackUrl').isURL(),
     body('type').optional().isIn(['plan_upgrade', 'lesson_fee']),
     body('amount').optional().isInt({ min: 1 }),
+    body('source').optional().isIn(['web', 'app']),
   ],
   validate,
   asyncHandler(async (req, res) => {
@@ -107,8 +108,13 @@ router.post('/initialize', authLimiter, requireAuth,
     if (!email)  return res.status(400).json({ error: 'No email on record' });
 
     const fees = feesSnap.exists ? feesSnap.data() : {};
+
+    // The mobile app charges its own activation price, held in a separate
+    // settings field so changing the app price never silently moves the
+    // website's monthly plan price (and vice versa).
+    const isApp = req.body.source === 'app';
     const planAmounts = {
-      pro: (fees.proMonthly || 2000) * 100,
+      pro: (isApp ? (fees.appActivation || 3000) : (fees.proMonthly || 2000)) * 100,
     };
 
     const amountKobo = paymentType === 'lesson_fee'
