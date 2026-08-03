@@ -34,6 +34,10 @@ router.post('/start', asyncHandler(async (req, res) => {
     status:       'live',
     viewerCount:  0,
     startedAt:    admin.firestore.FieldValue.serverTimestamp(),
+    // The admin Live Classes page sorts and filters on createdAt, the same
+    // stamp every session scheduled from the browser carries. A session written
+    // without it is a session that page cannot show.
+    createdAt:    admin.firestore.FieldValue.serverTimestamp(),
     muteAll:      false,
     mutedUsers:   {},
     kickedUsers:  {},
