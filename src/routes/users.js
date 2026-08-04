@@ -1,6 +1,7 @@
 const express        = require('express');
 const admin          = require('firebase-admin');
 const { requireAuth }          = require('../middleware/auth');
+const { generateTempPassword } = require('../utils/tempPassword');
 const asyncHandler             = require('../utils/asyncHandler');
 const logger                   = require('../utils/logger');
 const { getDb }                = require('../../config/firebase');
@@ -25,8 +26,16 @@ router.post('/on-signup', requireAuth, asyncHandler(async (req, res) => {
     phone       = '',
     state       = '',
     targetExam  = '',
-    plan        = 'free',
   } = req.body;
+
+  // `plan` is NOT taken from the body. This endpoint runs under requireAuth with
+  // no role check — any signed-in account can call it — and it writes straight to
+  // its own user document, so honouring a client-sent plan meant POSTing
+  // {"plan":"pro"} bought a free upgrade. A signup only ever starts on 'free';
+  // paid plans come from the verified Flutterwave path (upgradePlan /
+  // markLessonFeePaid), which is also the only place that sets planExpiresAt.
+  // An existing plan is preserved so a re-run cannot downgrade a paying student.
+  const plan = 'free';
 
   const email = req.user.email || req.userData?.email || '';
   const name  = `${firstName} ${lastName}`.trim();
@@ -51,6 +60,24 @@ router.post('/on-signup', requireAuth, asyncHandler(async (req, res) => {
         ),
       };
 
+  // Starting values belong to a genuinely new document only. Merged in
+  // unconditionally they made this endpoint a reset button on the caller's own
+  // account — a second call zeroed xp/streak/cbtCount and, with plan pinned to
+  // 'free' above, would now also strip a paid plan off a student who re-ran
+  // signup. An existing profile keeps its progress and its plan.
+  const freshPatch = existing.exists
+    ? {}
+    : {
+        plan,
+        xp:           0,
+        streak:       0,
+        cbtCount:     0,
+        totalCorrect: 0,
+        achievements: [],
+        fcmTokens:    [],
+        createdAt:    admin.firestore.FieldValue.serverTimestamp(),
+      };
+
   // 2. Create / merge the user document
   await db.collection('users').doc(uid).set(
     {
@@ -61,16 +88,9 @@ router.post('/on-signup', requireAuth, asyncHandler(async (req, res) => {
       phone,
       state,
       targetExam,
-      plan,
       role:         assignedRole,
-      xp:           0,
-      streak:       0,
-      cbtCount:     0,
-      totalCorrect: 0,
-      achievements: [],
-      fcmTokens:    [],
+      ...freshPatch,
       ...trialPatch,
-      createdAt:    admin.firestore.FieldValue.serverTimestamp(),
       updatedAt:    admin.firestore.FieldValue.serverTimestamp(),
     },
     { merge: true }
@@ -150,8 +170,7 @@ router.post('/create-admin', requireAdmin, asyncHandler(async (req, res) => {
     }, { merge: true });
   } catch (e) {
     if (e.code === 'auth/user-not-found') {
-      tempPassword = Math.random().toString(36).slice(-8)
-        + Math.random().toString(36).toUpperCase().slice(-4) + '!7';
+      tempPassword = generateTempPassword();
       const newUser = await authInstance.createUser({
         email,
         password:    tempPassword,

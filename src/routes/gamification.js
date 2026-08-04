@@ -8,6 +8,57 @@ const { getDb }      = require('../../config/firebase');
 const admin          = require('firebase-admin');
 
 const router = express.Router();
+
+// ─── GET /gamification/public-stats ─────────────────────────────────────────
+// Unauthenticated, and deliberately mounted above router.use(requireAuth).
+//
+// The landing page used to sign visitors in anonymously and read /users
+// directly for its top-5 board and headline counts. Firestore reads are
+// whole-document, so that handed every anonymous visitor the full profile —
+// email, phone, address, guardian contacts — of every student. This returns
+// the four display fields the page actually renders and nothing else, so the
+// rules can (and now do) refuse anonymous principals outright.
+const publicStatsCache = { data: null, cachedAt: 0 };
+const PUBLIC_STATS_TTL = 300_000; // 5 min — this is a marketing figure, not live data
+
+router.get('/public-stats', asyncHandler(async (req, res) => {
+  const now = Date.now();
+  if (publicStatsCache.data && now - publicStatsCache.cachedAt < PUBLIC_STATS_TTL) {
+    return res.json({ success: true, ...publicStatsCache.data });
+  }
+
+  const db = getDb();
+  const countOf = (name) =>
+    db.collection(name).count().get().then(s => s.data().count).catch(() => 0);
+
+  const [boardSnap, studentCount, srQuestions, jrQuestions] = await Promise.all([
+    db.collection('users').orderBy('xp', 'desc').limit(15).get(),
+    db.collection('users').count().get().then(s => s.data().count).catch(() => null),
+    countOf('questions'),
+    countOf('jssQuestions'),
+  ]);
+
+  // Names, state, XP and the self-chosen avatar — what the podium renders.
+  // No email, phone, plan or uid: this response is served to anyone.
+  const leaders = boardSnap.docs
+    .map(d => ({
+      role:         d.data().role         || 'student',
+      firstName:    d.data().firstName    || '',
+      lastName:     d.data().lastName     || '',
+      state:        d.data().state        || '—',
+      xp:           d.data().xp           || 0,
+      profileImage: d.data().profileImage || d.data().photoURL || null,
+    }))
+    .filter(u => u.role !== 'admin' && u.role !== 'super_admin')
+    .slice(0, 5)
+    .map(({ role, ...safe }) => safe); // role was only needed to filter staff out
+
+  const payload = { leaders, studentCount, questionCount: srQuestions + jrQuestions };
+  publicStatsCache.data     = payload;
+  publicStatsCache.cachedAt = now;
+  res.json({ success: true, ...payload });
+}));
+
 router.use(requireAuth);
 
 // ─── XP spec (matches documentation exactly) ────────────────────────────────

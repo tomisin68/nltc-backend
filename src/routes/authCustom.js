@@ -4,10 +4,31 @@ const admin        = require('firebase-admin');
 const asyncHandler = require('../utils/asyncHandler');
 const logger       = require('../utils/logger');
 const { getDb, getAuth } = require('../../config/firebase');
+const { requireAuth }    = require('../middleware/auth');
+const { authLimiter, otpLimiter } = require('../middleware/rateLimiter');
 const { Resend }   = require('resend');
 const { EMAILS_ENABLED } = require('../config/emailConfig');
 
 const router = express.Router();
+
+// A 6-digit code from Math.random() is neither uniform nor unpredictable — V8's
+// PRNG state is recoverable from a handful of outputs, so codes minted for other
+// signups help predict the next one. randomInt is CSPRNG-backed and unbiased.
+function generateOtp() {
+  return String(crypto.randomInt(100000, 1000000));
+}
+
+// Compare without leaking how much of the code was right via response timing.
+function otpMatches(expected, provided) {
+  if (typeof expected !== 'string' || typeof provided !== 'string') return false;
+  const a = Buffer.from(expected);
+  const b = Buffer.from(provided);
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
+// A 6-digit code is only 10^6 wide, so unlimited guesses is the whole attack.
+const MAX_OTP_ATTEMPTS = 5;
 
 const FROM_NAME  = process.env.EMAIL_FROM_NAME  || 'NLTC Online';
 const FROM_EMAIL = process.env.RESEND_FROM_EMAIL || 'no-reply@nltc.com.ng';
@@ -49,7 +70,10 @@ function buildBrandedEmail({ title, preheader, bodyHtml }) {
 
 // ─── POST /api/auth/request-password-reset ────────────────────────────────────
 // Public — no auth required. Generates a secure token and emails a reset link.
-router.post('/request-password-reset', asyncHandler(async (req, res) => {
+// Rate-limited: it sends mail to an address chosen by the caller, so without a
+// limit it is a free mail cannon pointed at any student's inbox (and a fast way
+// to burn the Resend quota).
+router.post('/request-password-reset', authLimiter, asyncHandler(async (req, res) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ error: 'email is required' });
 
@@ -128,7 +152,7 @@ router.post('/request-password-reset', asyncHandler(async (req, res) => {
 
 // ─── POST /api/auth/reset-password ───────────────────────────────────────────
 // Validates the token and updates the password via Firebase Admin SDK.
-router.post('/reset-password', asyncHandler(async (req, res) => {
+router.post('/reset-password', authLimiter, asyncHandler(async (req, res) => {
   const { token, newPassword } = req.body;
   if (!token || !newPassword) return res.status(400).json({ error: 'token and newPassword are required' });
   if (newPassword.length < 6)  return res.status(400).json({ error: 'Password must be at least 6 characters' });
@@ -154,13 +178,20 @@ router.post('/reset-password', asyncHandler(async (req, res) => {
 }));
 
 // ─── POST /api/auth/send-otp ──────────────────────────────────────────────────
-// Generates a 6-digit OTP and sends it to the user's email.
-router.post('/send-otp', asyncHandler(async (req, res) => {
-  const { uid, email } = req.body;
-  if (!uid || !email) return res.status(400).json({ error: 'uid and email are required' });
+// Generates a 6-digit OTP and sends it to the signed-in user's own email.
+//
+// This used to be unauthenticated and took `uid` and `email` straight from the
+// body, which meant anyone could (a) overwrite the pending OTP of any account
+// they knew the uid of, redirecting the code to an address of their choosing,
+// and (b) mail arbitrary addresses on demand. The caller is now the account:
+// uid and email come from the verified ID token. The signup flow already holds
+// a token by the time it calls this, so nothing legitimate loses access.
+router.post('/send-otp', otpLimiter, requireAuth, asyncHandler(async (req, res) => {
+  const uid   = req.user.uid;
+  const email = req.user.email;
+  if (!email) return res.status(400).json({ error: 'This account has no email address' });
 
-  // Generate 6-digit OTP
-  const otp       = String(Math.floor(100000 + Math.random() * 900000));
+  const otp       = generateOtp();
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
   const db = getDb();
@@ -169,6 +200,7 @@ router.post('/send-otp', asyncHandler(async (req, res) => {
     email,
     expiresAt: admin.firestore.Timestamp.fromDate(expiresAt),
     verified:  false,
+    attempts:  0,
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
   });
 
@@ -202,23 +234,53 @@ router.post('/send-otp', asyncHandler(async (req, res) => {
 
 // ─── POST /api/auth/verify-otp ────────────────────────────────────────────────
 // Validates the OTP and marks emailVerified = true in Firebase Auth.
-router.post('/verify-otp', asyncHandler(async (req, res) => {
-  const { uid, otp } = req.body;
-  if (!uid || !otp) return res.status(400).json({ error: 'uid and otp are required' });
+//
+// Previously unauthenticated with the target uid in the body, and with no cap on
+// guesses — 10^6 codes against an endpoint anyone could call for any account.
+// Now the caller can only verify themselves, and a wrong code costs them one of
+// five attempts before the code is burned and has to be re-sent.
+router.post('/verify-otp', otpLimiter, requireAuth, asyncHandler(async (req, res) => {
+  const uid = req.user.uid;
+  const otp = typeof req.body.otp === 'string' ? req.body.otp.trim() : '';
+  if (!otp) return res.status(400).json({ error: 'otp is required' });
 
-  const db   = getDb();
-  const snap = await db.collection('emailOtps').doc(uid).get();
+  const db  = getDb();
+  const ref = db.collection('emailOtps').doc(uid);
 
-  if (!snap.exists) return res.status(400).json({ error: 'No verification pending for this account' });
+  // A transaction so parallel guesses cannot each read attempts=4 and all pass.
+  const outcome = await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) return { code: 400, error: 'No verification pending for this account' };
 
-  const data = snap.data();
-  if (data.verified)                       return res.status(400).json({ error: 'Email already verified' });
-  if (data.expiresAt.toDate() < new Date()) return res.status(400).json({ error: 'Code expired — request a new one' });
-  if (data.otp !== otp.trim())              return res.status(400).json({ error: 'Incorrect code' });
+    const data = snap.data();
+    if (data.verified)                        return { code: 400, error: 'Email already verified' };
+    if (data.expiresAt.toDate() < new Date()) return { code: 400, error: 'Code expired — request a new one' };
 
-  // Mark verified in Firebase Auth + Firestore
+    const attempts = data.attempts || 0;
+    if (attempts >= MAX_OTP_ATTEMPTS) {
+      return { code: 429, error: 'Too many incorrect codes — request a new one' };
+    }
+
+    if (!otpMatches(data.otp, otp)) {
+      tx.update(ref, { attempts: attempts + 1 });
+      const left = MAX_OTP_ATTEMPTS - (attempts + 1);
+      return {
+        code:  400,
+        error: left > 0 ? 'Incorrect code' : 'Too many incorrect codes — request a new one',
+      };
+    }
+
+    tx.update(ref, { verified: true });
+    return { ok: true };
+  });
+
+  if (!outcome.ok) {
+    if (outcome.code === 429) logger.warn('OTP attempt limit reached', { uid });
+    return res.status(outcome.code).json({ error: outcome.error });
+  }
+
+  // Mark verified in Firebase Auth + the profile
   await getAuth().updateUser(uid, { emailVerified: true });
-  await db.collection('emailOtps').doc(uid).update({ verified: true });
   await db.collection('users').doc(uid).update({
     emailVerified: true,
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -229,13 +291,15 @@ router.post('/verify-otp', asyncHandler(async (req, res) => {
 }));
 
 // ─── POST /api/auth/resend-otp ────────────────────────────────────────────────
-router.post('/resend-otp', asyncHandler(async (req, res) => {
-  const { uid, email } = req.body;
-  if (!uid || !email) return res.status(400).json({ error: 'uid and email are required' });
+// Same footing as /send-otp: the caller can only ever re-send to their own
+// verified-token email address. Resending also resets the attempt counter,
+// which is fine — it costs a fresh unguessable code.
+router.post('/resend-otp', otpLimiter, requireAuth, asyncHandler(async (req, res) => {
+  const uid   = req.user.uid;
+  const email = req.user.email;
+  if (!email) return res.status(400).json({ error: 'This account has no email address' });
 
-  // Re-use send-otp logic
-  req.body = { uid, email };
-  const otp       = String(Math.floor(100000 + Math.random() * 900000));
+  const otp       = generateOtp();
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
   const db = getDb();
@@ -243,6 +307,7 @@ router.post('/resend-otp', asyncHandler(async (req, res) => {
     otp, email,
     expiresAt: admin.firestore.Timestamp.fromDate(expiresAt),
     verified:  false,
+    attempts:  0,
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
   });
 

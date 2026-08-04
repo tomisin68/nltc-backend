@@ -1,5 +1,6 @@
 const express        = require('express');
 const admin          = require('firebase-admin');
+const { generateTempPassword } = require('../utils/tempPassword');
 const { requireSuperAdmin } = require('../middleware/auth');
 const asyncHandler   = require('../utils/asyncHandler');
 const logger         = require('../utils/logger');
@@ -52,9 +53,7 @@ router.post('/add', asyncHandler(async (req, res) => {
   } catch (e) {
     if (e.code === 'auth/user-not-found') {
       // Generate a secure temporary password (user should reset via email link)
-      const tempPassword = Math.random().toString(36).slice(-8)
-        + Math.random().toString(36).toUpperCase().slice(-4)
-        + '!1';
+      const tempPassword = generateTempPassword();
       const newUser = await authInstance.createUser({
         email,
         password:      tempPassword,

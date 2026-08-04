@@ -29,4 +29,18 @@ const agoraLimiter = rateLimit({
   message: { error: 'Too many token requests.' },
 });
 
-module.exports = { generalLimiter, authLimiter, webhookLimiter, agoraLimiter };
+// Email verification (send / resend / verify OTP).
+//
+// Looser than authLimiter on purpose: a physical centre signs a whole class up
+// from one NAT'd IP, and at 20/15min the tail of that class would be locked out
+// of verifying at all. Brute force is held off per-account instead — five wrong
+// codes burns the OTP — so this limit only has to bound mail volume and blind
+// scanning, which 60/15min does comfortably.
+const OTP_MAX = parseInt(process.env.OTP_RATE_LIMIT_MAX || '60', 10);
+
+const otpLimiter = rateLimit({
+  windowMs: WINDOW_MS, max: OTP_MAX, standardHeaders: true, legacyHeaders: false,
+  message: { error: 'Too many verification requests. Please wait a few minutes.' },
+});
+
+module.exports = { generalLimiter, authLimiter, webhookLimiter, agoraLimiter, otpLimiter };

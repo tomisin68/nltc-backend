@@ -83,9 +83,28 @@ async function verifyTransaction(reference) {
   };
 }
 
+// The webhook grants plans and marks lesson fees paid for whatever uid the
+// payload names, so this is the only thing standing between an unauthenticated
+// POST and free access for any account.
+//
+// It used to `return true` when FLUTTERWAVE_SECRET_HASH was unset — one missing
+// env var on Render (a typo, a restored-from-scratch service) silently turned
+// the endpoint into an open "upgrade anyone" API, with nothing but a console
+// warning to say so. It now fails closed: no configured hash, no accepted
+// webhook. The comparison is constant-time so the hash cannot be recovered a
+// byte at a time from response timing.
 function validateWebhookSignature(rawBody, signature) {
-  if (!SECRET_HASH) { console.warn('⚠️ FLUTTERWAVE_SECRET_HASH not set'); return true; }
-  return typeof signature === 'string' && signature === SECRET_HASH;
+  if (!SECRET_HASH) {
+    console.error('FLUTTERWAVE_SECRET_HASH is not set — rejecting webhook');
+    return false;
+  }
+  if (typeof signature !== 'string' || signature.length === 0) return false;
+
+  const provided = Buffer.from(signature);
+  const expected = Buffer.from(SECRET_HASH);
+  // timingSafeEqual throws on a length mismatch, which would itself leak length.
+  if (provided.length !== expected.length) return false;
+  return crypto.timingSafeEqual(provided, expected);
 }
 
 module.exports = { initializePayment, verifyTransaction, validateWebhookSignature };

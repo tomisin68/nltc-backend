@@ -84,8 +84,10 @@ router.post('/initialize', authLimiter, requireAuth,
     body('plan').optional().isIn(['pro']),
     body('callbackUrl').isURL(),
     body('type').optional().isIn(['plan_upgrade', 'lesson_fee']),
-    body('amount').optional().isInt({ min: 1 }),
+    // NB: no body('amount') — the price is looked up server-side from the
+    // class document / settings.fees. Anything the caller sends is ignored.
     body('source').optional().isIn(['web', 'app']),
+    body('metadata.classId').optional().isString().trim().notEmpty(),
   ],
   validate,
   asyncHandler(async (req, res) => {
@@ -117,14 +119,47 @@ router.post('/initialize', authLimiter, requireAuth,
       pro: (isApp ? (fees.appActivation || 3000) : (fees.proMonthly || 2000)) * 100,
     };
 
-    const amountKobo = paymentType === 'lesson_fee'
-      ? (req.body.amount || fees.lessonFeeDefault || 5000) * 100
-      : planAmounts[req.body.plan];
+    // What the student is charged is decided here, never by the caller.
+    //
+    // The lesson fee used to be `req.body.amount`, taken on trust. Paying it
+    // runs markLessonFeePaid(), which grants plan:'pro' for 30 days — so
+    // POSTing {"type":"lesson_fee","amount":1} bought a month of the full
+    // platform for ₦1. The client already sends metadata.classId, so the price
+    // is read from that class document instead; the class is also the source of
+    // the name and type that end up on the payment record, which stops a cheap
+    // class being paid for and an expensive one being recorded.
+    let amountKobo;
+    let lessonFeeMeta = {};
+    let description   = null;
 
-    // For lesson_fee, pass the class name as description so it appears in payment records.
-    const description = paymentType === 'lesson_fee'
-      ? (req.body.metadata?.description || req.body.metadata?.className || null)
-      : null;
+    if (paymentType === 'lesson_fee') {
+      const classId = req.body.metadata?.classId;
+      if (!classId) {
+        return res.status(400).json({ error: 'metadata.classId is required for lesson_fee payments' });
+      }
+
+      const classSnap = await db.collection('classes').doc(String(classId)).get();
+      if (!classSnap.exists) {
+        return res.status(404).json({ error: 'That class no longer exists' });
+      }
+
+      const cls = classSnap.data();
+      if (cls.active === false) {
+        return res.status(409).json({ error: 'That class is not open for payment' });
+      }
+
+      const price = Number(cls.price);
+      if (!Number.isFinite(price) || price <= 0) {
+        logger.error('Class has no usable price', { classId, price: cls.price });
+        return res.status(409).json({ error: 'That class has no price set. Please contact support.' });
+      }
+
+      amountKobo    = Math.round(price * 100);
+      description   = cls.name || 'Lesson fee payment';
+      lessonFeeMeta = { classId: String(classId), classType: cls.type || 'general', className: cls.name || null };
+    } else {
+      amountKobo = planAmounts[req.body.plan];
+    }
 
     const result = await initializePayment(
       email,
@@ -134,9 +169,7 @@ router.post('/initialize', authLimiter, requireAuth,
       amountKobo,
       paymentType,
       description,
-      paymentType === 'lesson_fee'
-        ? { classId: req.body.metadata?.classId, classType: req.body.metadata?.classType, className: req.body.metadata?.className }
-        : {},
+      lessonFeeMeta,
     );
 
     logger.info('Flutterwave checkout initialised', { uid, plan: req.body.plan, type: paymentType, amountKobo, description });
