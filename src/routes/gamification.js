@@ -134,24 +134,54 @@ async function awardXP(uid, action, meta = {}) {
   const db      = getDb();
   const userRef = db.collection('users').doc(uid);
 
+  // A lesson pays out once per video, ever — see the collection comment below.
+  // The receipt is read inside the transaction so two taps landing together
+  // cannot both find it missing.
+  const videoId    = action === 'watch_lesson' ? String(meta.videoId || '') : '';
+  if (action === 'watch_lesson' && !videoId) {
+    // Without it there is nothing to deduplicate against, which is exactly the
+    // request an XP farmer would send. The route rejects this first; this is
+    // the backstop for any future caller.
+    throw new Error('watch_lesson requires meta.videoId');
+  }
+  // Escaped so any id a client can send is a legal document id — `/` is illegal
+  // in one, and `.` / `..` are reserved names on their own.
+  const lessonRef  = videoId
+    ? userRef.collection('lessonXp').doc(encodeURIComponent(videoId).replace(/\./g, '%2E'))
+    : null;
+
   return db.runTransaction(async (tx) => {
-    const snap = await tx.get(userRef);
+    // Firestore requires every read in a transaction to precede every write.
+    const [snap, lessonSnap] = await Promise.all([
+      tx.get(userRef),
+      lessonRef ? tx.get(lessonRef) : Promise.resolve(null),
+    ]);
     if (!snap.exists) throw new Error('User not found');
 
     const profile = snap.data();
 
+    const alreadyPaid = (xp) => ({
+      newXP:              xp,
+      xpEarned:           0,
+      newStreak:          profile.streak || 0,
+      streakBonusAwarded: false,
+      alreadyAwarded:     true,
+      leveledUp:          false,
+      newAchievements:    [],
+      ...xpToLevel(xp),
+    });
+
     // first_login is once-ever — idempotent
     if (action === 'first_login' && profile.firstLoginXpAwarded) {
-      return {
-        newXP:              profile.xp || 0,
-        xpEarned:           0,
-        newStreak:          profile.streak || 0,
-        streakBonusAwarded: false,
-        alreadyAwarded:     true,
-        leveledUp:          false,
-        newAchievements:    [],
-        ...xpToLevel(profile.xp || 0),
-      };
+      return alreadyPaid(profile.xp || 0);
+    }
+
+    // watch_lesson is once per video, ever. Opening a lesson used to pay 20 XP
+    // every time, so the leaderboard rewarded whoever opened and closed the
+    // most videos rather than whoever studied. A second viewing is still
+    // welcome — it just isn't paid for again.
+    if (lessonSnap?.exists) {
+      return alreadyPaid(profile.xp || 0);
     }
 
     let xpEarned = computeBaseXP(action, meta);
@@ -226,6 +256,16 @@ async function awardXP(uid, action, meta = {}) {
 
     tx.update(userRef, updates);
 
+    // The receipt that stops this video paying out again. Written last so a
+    // failed award never leaves a student unable to earn the XP at all.
+    if (lessonRef) {
+      tx.set(lessonRef, {
+        videoId,
+        xpEarned:   xpEarned,
+        awardedAt:  admin.firestore.FieldValue.serverTimestamp(),
+      });
+    }
+
     return {
       newXP, xpEarned, newStreak: streak, streakBonusAwarded, leveledUp,
       newCbtCount, newAchievements, newWeeklyXp,
@@ -242,6 +282,15 @@ router.post(
       .isIn(['watch_lesson', 'cbt_session', 'join_live', 'first_login', 'daily_streak', 'daily_mission'])
       .withMessage('action must be one of: watch_lesson, cbt_session, join_live, first_login, daily_streak, daily_mission'),
     body('meta').optional().isObject().withMessage('meta must be an object'),
+    // A lesson award is keyed by the video it is for, so the video has to be
+    // named. `encodeURIComponent` makes it a legal document id; the length cap
+    // keeps that inside Firestore's 1,500-byte limit.
+    body('meta.videoId')
+      .if(body('action').equals('watch_lesson'))
+      .isString().bail()
+      .trim()
+      .isLength({ min: 1, max: 200 })
+      .withMessage('meta.videoId is required for watch_lesson'),
   ],
   validate,
   asyncHandler(async (req, res) => {

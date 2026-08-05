@@ -108,6 +108,13 @@ POST /api/gamification/xp
 |---|---|---|---|
 | `action` | string | ✅ | `watch_lesson`, `join_live`, `daily_streak`, `complete_cbt` |
 | `meta` | object | ❌ | `{ score: 92 }` — only needed with `complete_cbt` for 90%+ bonus |
+| `meta.videoId` | string | ✅ with `watch_lesson` | Which lesson. A lesson pays out **once per video, ever** — see below |
+
+**`watch_lesson` is idempotent per video.** The first award for a video writes a
+receipt at `users/{uid}/lessonXp/{videoId}`; every later call for the same video
+returns `xpEarned: 0` and `alreadyAwarded: true` instead of paying again. Send
+the award when the lesson opens as before — the server decides whether it counts.
+A call with no `meta.videoId` is rejected with `400`.
 
 **Response**
 ```json
@@ -138,7 +145,7 @@ POST /api/gamification/xp
 
 | Action | Base XP | Bonus |
 |---|---|---|
-| `watch_lesson` | 15 XP | — |
+| `watch_lesson` | 15 XP | — (once per video, ever) |
 | `complete_cbt` | 30 XP | +20 XP if score ≥ 90% |
 | `join_live` | 50 XP | — |
 | `daily_streak` | 10 XP | — |
@@ -149,7 +156,7 @@ async function awardLessonXP() {
   const res = await fetch('https://nltc-backend.onrender.com/api/gamification/xp', {
     method: 'POST',
     headers: await authHeaders(),
-    body: JSON.stringify({ action: 'watch_lesson' }),
+    body: JSON.stringify({ action: 'watch_lesson', meta: { videoId } }),
   });
   const data = await res.json();
 
@@ -687,8 +694,8 @@ export const api = {
 ```js
 import { api } from './api.js';
 
-// Award XP after watching lesson
-const xp = await api.awardXP('watch_lesson');
+// Award XP after watching lesson — only the first viewing of a video pays
+const xp = await api.awardXP('watch_lesson', { videoId });
 if (xp.leveledUp) showToast(`Level Up! You're Level ${xp.level} 🎉`);
 
 // Save CBT result
