@@ -6,6 +6,9 @@ const { validate }    = require('../middleware/validate');
 const { authLimiter } = require('../middleware/rateLimiter');
 const { resolveBankAccount } = require('../config/bankAccount');
 const { sendInAppNotification, sendPushToTokens } = require('../services/notificationService');
+const {
+  sendAdminPaymentReceiptEmail, sendPaymentConfirmedEmail, sendPaymentRejectedEmail,
+} = require('../services/emailService');
 const asyncHandler    = require('../utils/asyncHandler');
 const logger          = require('../utils/logger');
 const { getDb }       = require('../../config/firebase');
@@ -201,16 +204,28 @@ function validateReceipt({ receiptUrl, receiptPath, uid }) {
   return null;
 }
 
-/** Fans a notification out to every admin: in-app row plus push where possible. */
-async function notifyAdmins(db, { title, body, type, data, iconEmoji }) {
+/**
+ * Fans a notification out to every admin: in-app row, push, and email.
+ *
+ * All three, because an unreviewed receipt is a student who has paid and cannot
+ * get in. An admin who is not at the console that day should still find out.
+ *
+ * [email] carries the fields the email template needs; push and email are both
+ * best-effort — a dead token or a Resend outage must not fail the student's
+ * submission, which has already been recorded by the time this runs.
+ */
+async function notifyAdmins(db, { title, body, type, data, iconEmoji, email }) {
   const snap = await db.collection('users').where('role', 'in', ['admin', 'super_admin']).get();
   if (snap.empty) return;
 
-  const tokens = [];
-  const batch  = db.batch();
+  const tokens    = [];
+  const addresses = [];
+  const batch     = db.batch();
 
   snap.forEach(d => {
-    tokens.push(...(d.data().fcmTokens || []));
+    const u = d.data();
+    tokens.push(...(u.fcmTokens || []));
+    if (u.email) addresses.push(u.email);
     const ref = d.ref.collection('notifications').doc();
     batch.set(ref, {
       title, body, type,
@@ -224,9 +239,50 @@ async function notifyAdmins(db, { title, body, type, data, iconEmoji }) {
   await batch.commit();
 
   if (tokens.length) {
-    // Push is best-effort: a dead token must not fail the student's submission.
     sendPushToTokens(tokens, { title, body, data: data || {} })
       .catch(e => logger.error('Admin payment push failed', { err: e.message }));
+  }
+
+  if (email) {
+    for (const adminEmail of addresses) {
+      sendAdminPaymentReceiptEmail({ adminEmail, ...email })
+        .catch(e => logger.error('Admin payment email failed', { adminEmail, err: e.message }));
+    }
+  }
+}
+
+/**
+ * Tells a student what happened to their receipt: in-app row plus push.
+ *
+ * Both outcomes go through here. A rejection used to write the in-app row only,
+ * so the one notification a student actually needs to act on — re-upload a
+ * clearer receipt — was the one that never reached their phone.
+ *
+ * [pushBody] is the shorter line for the notification tray, where the full
+ * in-app text would be truncated anyway.
+ */
+async function notifyStudent(db, uid, { title, body, pushBody, type, data, iconEmoji, email }) {
+  await sendInAppNotification(uid, { title, body, type, data, iconEmoji });
+
+  const userSnap = await db.collection('users').doc(uid).get();
+  const user = userSnap.exists ? userSnap.data() : {};
+
+  const tokens = user.fcmTokens || [];
+  if (tokens.length) {
+    // Not awaited: a dead token must not stop the email that follows it.
+    sendPushToTokens(tokens, {
+      title,
+      body: pushBody || body,
+      data: { ...(data || {}), type },
+    }).catch(e => logger.error('Student payment push failed', { uid, err: e.message }));
+  }
+
+  // [email] is { send, payload } — the template to use and what it needs. The
+  // address and first name come from the profile rather than the caller, so
+  // they cannot go stale against a proof written days earlier.
+  if (email && user.email) {
+    email.send({ email: user.email, firstName: user.firstName, ...email.payload })
+      .catch(e => logger.error('Student payment email failed', { uid, err: e.message }));
   }
 }
 
@@ -435,6 +491,13 @@ router.post('/proof', authLimiter, requireAuth,
       type:  'payment_proof',
       data:  { proofId: reference, uid, amount: String(priced.amount) },
       iconEmoji: '🧾',
+      email: {
+        studentName,
+        studentEmail: proof.studentEmail,
+        amount:       priced.amount,
+        description:  priced.description,
+        receiptUrl:   req.body.receiptUrl,
+      },
     }).catch(err => logger.error('Failed to notify admins of payment proof', { reference, error: err.message }));
 
     logger.info('Payment proof submitted', { uid, reference, type: paymentType, amount: priced.amount });
@@ -534,26 +597,23 @@ router.post('/proofs/:id/approve', requireAdmin,
     const expiresAt = new Date(Date.now() + ACCESS_MS);
     const prettyExpiry = expiresAt.toLocaleDateString('en-NG', { day: 'numeric', month: 'long', year: 'numeric' });
 
-    Promise.all([
-      sendInAppNotification(uid, {
-        title: 'Payment confirmed 🎉',
-        body:  `Your ₦${(amount || 0).toLocaleString('en-NG')} payment for ${description || 'your fee'} has been confirmed. Your account is active until ${prettyExpiry}.`,
-        type:  'payment_approved',
-        data:  { reference, amount: String(amount || 0) },
-        iconEmoji: '✅',
-      }),
-      (async () => {
-        const userSnap = await db.collection('users').doc(uid).get();
-        const tokens = userSnap.exists ? (userSnap.data().fcmTokens || []) : [];
-        if (tokens.length) {
-          await sendPushToTokens(tokens, {
-            title: 'Payment confirmed 🎉',
-            body:  'Your account is now active. Tap to start learning.',
-            data:  { reference, type: 'payment_approved' },
-          });
-        }
-      })(),
-    ]).catch(err => logger.error('Failed to notify student of approval', { uid, reference, error: err.message }));
+    notifyStudent(db, uid, {
+      title:    'Payment confirmed 🎉',
+      body:     `Your ₦${(amount || 0).toLocaleString('en-NG')} payment for ${description || 'your fee'} has been confirmed. Your account is active until ${prettyExpiry}.`,
+      pushBody: 'Your account is now active. Tap to start learning.',
+      type:     'payment_approved',
+      data:     { reference, amount: String(amount || 0) },
+      iconEmoji: '✅',
+      email: {
+        send: sendPaymentConfirmedEmail,
+        payload: {
+          amount,
+          description: description || 'Monthly fee',
+          reference,
+          expiresAt,
+        },
+      },
+    }).catch(err => logger.error('Failed to notify student of approval', { uid, reference, error: err.message }));
 
     logger.info('Payment proof approved', { reference, uid, by: req.user.uid, amount });
     res.json({ success: true, status: 'approved', reference, expiresAt: expiresAt.toISOString() });
@@ -605,12 +665,17 @@ router.post('/proofs/:id/reject', requireAdmin,
       status: 'failed',
     }).catch(err => logger.warn('Failed to mark payment record failed', { reference, error: err.message }));
 
-    sendInAppNotification(uid, {
-      title: 'Payment receipt not accepted',
-      body:  `We could not confirm your ₦${(amount || 0).toLocaleString('en-NG')} payment. Reason: ${reason}. Please upload a clearer receipt or contact support.`,
-      type:  'payment_rejected',
-      data:  { reference, reason },
+    notifyStudent(db, uid, {
+      title:    'Payment receipt not accepted',
+      body:     `We could not confirm your ₦${(amount || 0).toLocaleString('en-NG')} payment. Reason: ${reason}. Please upload a clearer receipt or contact support.`,
+      pushBody: `${reason} — tap to upload a new receipt.`,
+      type:     'payment_rejected',
+      data:     { reference, reason },
       iconEmoji: '⚠️',
+      email: {
+        send: sendPaymentRejectedEmail,
+        payload: { amount, description: description || 'Monthly fee', reason },
+      },
     }).catch(err => logger.error('Failed to notify student of rejection', { uid, reference, error: err.message }));
 
     logger.info('Payment proof rejected', { reference, uid, by: req.user.uid, reason });

@@ -1,6 +1,6 @@
 const { Resend } = require('resend');
 const logger     = require('../utils/logger');
-const { EMAILS_ENABLED, ADMIN_EMAILS_ENABLED } = require('../config/emailConfig');
+const { EMAILS_ENABLED, ADMIN_EMAILS_ENABLED, PAYMENT_EMAILS_ENABLED } = require('../config/emailConfig');
 
 let resend = null;
 
@@ -432,4 +432,221 @@ async function sendAdminInactivityAlert({ adminEmail, studentName, studentEmail,
   }
 }
 
-module.exports = { sendWelcomeEmail, verifyTransporter, sendWeeklyProgressEmail, sendInactivityEmail, sendAdminInactivityAlert };
+// ─── Payment mail ───────────────────────────────────────────────────────────
+//
+// Payments are manual: a student transfers, uploads a receipt, and an admin
+// confirms it. Nobody is watching a webhook, so these three messages are what
+// keep the loop moving — the admin learns a receipt is waiting, and the student
+// learns whether they are in.
+
+const money = n => `₦${Number(n || 0).toLocaleString('en-NG')}`;
+
+/** Escapes text that came from a user before it goes into an HTML template. */
+function esc(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+/**
+ * Flattens user-supplied text before it goes in a subject line.
+ *
+ * A student picks their own name, and it reaches the subject verbatim. Resend
+ * takes JSON rather than raw SMTP so a newline cannot forge a header here, and
+ * a subject is plain text so markup cannot execute in one — but neither renders
+ * as anything an admin wants to read in a list of alerts. Angle brackets and
+ * control characters go, and the length cap keeps a pasted essay from pushing
+ * the amount out of the inbox preview.
+ */
+function subjectSafe(s, max = 80) {
+  const flat = String(s ?? '')
+    .replace(/[<>]/g, '')
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+function mailFrom() {
+  const fromName  = process.env.EMAIL_FROM_NAME   || 'NLTC Online';
+  const fromEmail = process.env.RESEND_FROM_EMAIL || 'no-reply@nltc.ng';
+  return `${fromName} <${fromEmail}>`;
+}
+
+/** Shared chrome so the three payment mails read as one set. */
+function paymentShell({ accent, emoji, heading, subheading, body }) {
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>${esc(heading)}</title></head>
+<body style="margin:0;padding:0;background:#f5f7fa;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f7fa;padding:32px 16px;"><tr><td align="center">
+<table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 32px rgba(0,0,0,.08);">
+  <tr><td style="background:${accent};padding:28px 40px;text-align:center;">
+    <p style="margin:0;font-size:32px;">${emoji}</p>
+    <h1 style="margin:8px 0 0;color:#ffffff;font-size:20px;font-weight:900;">${esc(heading)}</h1>
+    <p style="margin:6px 0 0;color:rgba(255,255,255,.75);font-size:13px;">${esc(subheading)}</p>
+  </td></tr>
+  <tr><td style="padding:32px 40px;">${body}</td></tr>
+  <tr><td style="background:#f8f9fc;padding:20px 40px;border-top:1px solid #e5e7eb;text-align:center;">
+    <p style="margin:0;font-size:12px;color:#9ca3af;">&copy; ${new Date().getFullYear()} NLTC Online &nbsp;&middot;&nbsp; nltcglobalservices@gmail.com</p>
+  </td></tr>
+</table></td></tr></table></body></html>`;
+}
+
+function detailRows(rows) {
+  const cells = rows.map(([label, value, strong], i) => `
+      <tr style="border-top:1px solid #e5e7eb;${i % 2 ? 'background:#fafafa;' : ''}">
+        <td style="padding:11px 16px;font-size:13px;color:#6b7280;width:42%;">${esc(label)}</td>
+        <td style="padding:11px 16px;font-size:13px;${strong ? 'font-weight:700;' : ''}color:#0B1D3A;">${esc(value)}</td>
+      </tr>`).join('');
+  return `<table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px;border-radius:8px;border:1px solid #e5e7eb;overflow:hidden;">
+      <tr style="background:#f8f9fc;"><td colspan="2" style="padding:10px 16px;font-size:12px;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:.08em;">Payment Details</td></tr>
+      ${cells}
+    </table>`;
+}
+
+function button(href, label, bg = '#0B1D3A', fg = '#D4A017') {
+  return `<table cellpadding="0" cellspacing="0" style="margin:0 0 8px;"><tr><td style="background:${bg};border-radius:8px;">
+      <a href="${href}" style="display:inline-block;padding:12px 28px;color:${fg};font-weight:800;font-size:14px;text-decoration:none;">${label}</a>
+    </td></tr></table>`;
+}
+
+/**
+ * Tells an admin a receipt is waiting.
+ *
+ * Every one of these is a student who has paid and is locked out until somebody
+ * opens the queue, which is why it carries the amount and a direct link rather
+ * than just saying "you have a notification".
+ */
+async function sendAdminPaymentReceiptEmail({ adminEmail, studentName, studentEmail, amount, description, receiptUrl }) {
+  const r = getResend(PAYMENT_EMAILS_ENABLED);
+  if (!r || !adminEmail) return;
+
+  const html = paymentShell({
+    accent: '#0B1D3A', emoji: '🧾',
+    heading: 'New payment receipt',
+    subheading: 'A student is waiting to be activated',
+    body: `
+    <p style="margin:0 0 20px;font-size:15px;color:#374151;line-height:1.7;">
+      <strong>${esc(studentName)}</strong> has uploaded proof of a bank transfer and is locked out until it is confirmed.
+    </p>
+    ${detailRows([
+      ['Student', studentName, true],
+      ['Email', studentEmail || '—'],
+      ['Amount', money(amount), true],
+      ['For', description || 'Monthly fee'],
+    ])}
+    <p style="margin:0 0 16px;font-size:14px;color:#374151;line-height:1.7;">
+      Check the transfer landed, then approve it — approving activates the account for 30 days straight away.
+    </p>
+    ${button('https://nltc.com.ng/admin', 'Open the Receipts Queue &rarr;')}
+    ${receiptUrl ? `<p style="margin:12px 0 0;font-size:13px;"><a href="${esc(receiptUrl)}" style="color:#0B1D3A;">View the uploaded receipt</a></p>` : ''}`,
+  });
+
+  try {
+    const { error } = await r.emails.send({
+      from: mailFrom(), to: adminEmail,
+      subject: `[NLTC] ${subjectSafe(studentName)} sent a receipt for ${money(amount)}`,
+      html,
+    });
+    if (error) throw new Error(error.message);
+    logger.info('Admin payment receipt email sent', { adminEmail, amount });
+  } catch (err) {
+    logger.error('Failed to send admin payment email', { adminEmail, err: err.message });
+  }
+}
+
+/** Tells a student their payment went through and their account is open. */
+async function sendPaymentConfirmedEmail({ email, firstName, amount, description, reference, expiresAt }) {
+  const r = getResend(PAYMENT_EMAILS_ENABLED);
+  if (!r || !email) return;
+
+  const pretty = expiresAt
+    ? new Date(expiresAt).toLocaleDateString('en-NG', { day: 'numeric', month: 'long', year: 'numeric' })
+    : null;
+
+  const html = paymentShell({
+    accent: '#16A34A', emoji: '✅',
+    heading: 'Payment confirmed',
+    subheading: 'Your account is now active',
+    body: `
+    <p style="margin:0 0 20px;font-size:15px;color:#374151;line-height:1.7;">
+      Hi ${esc(firstName || 'there')}, we have confirmed your transfer. Everything is unlocked — lessons, CBT, mock exams and live classes.
+    </p>
+    ${detailRows([
+      ['Amount paid', money(amount), true],
+      ['For', description || 'Monthly fee'],
+      ...(pretty ? [['Active until', pretty, true]] : []),
+      ['Reference', reference || '—'],
+    ])}
+    ${button('https://nltc.com.ng/dashboard', 'Start Learning &rarr;')}
+    <p style="margin:16px 0 0;font-size:13px;color:#6b7280;line-height:1.7;">
+      Keep this email as your receipt. Quote the reference above for any query about this payment.
+    </p>`,
+  });
+
+  try {
+    const { error } = await r.emails.send({
+      from: mailFrom(), to: email,
+      subject: `Payment confirmed — your NLTC account is active`,
+      html,
+    });
+    if (error) throw new Error(error.message);
+    logger.info('Payment confirmed email sent', { email, reference });
+  } catch (err) {
+    logger.error('Failed to send payment confirmed email', { email, err: err.message });
+  }
+}
+
+/**
+ * Tells a student their receipt was not accepted, and why.
+ *
+ * The reason is the whole point — "your payment failed" with no cause leaves
+ * them with nothing to do but guess or open a support thread.
+ */
+async function sendPaymentRejectedEmail({ email, firstName, amount, description, reason }) {
+  const r = getResend(PAYMENT_EMAILS_ENABLED);
+  if (!r || !email) return;
+
+  const html = paymentShell({
+    accent: '#DC2626', emoji: '⚠️',
+    heading: 'We could not confirm your payment',
+    subheading: 'Your account has not been activated yet',
+    body: `
+    <p style="margin:0 0 20px;font-size:15px;color:#374151;line-height:1.7;">
+      Hi ${esc(firstName || 'there')}, we reviewed the receipt you sent but could not confirm the transfer.
+    </p>
+    <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px;background:#fef2f2;border:1px solid #fca5a5;border-radius:8px;">
+      <tr><td style="padding:14px 16px;">
+        <p style="margin:0 0 4px;font-size:12px;font-weight:700;color:#991b1b;text-transform:uppercase;letter-spacing:.06em;">Reason</p>
+        <p style="margin:0;font-size:14px;color:#7f1d1d;line-height:1.6;">${esc(reason)}</p>
+      </td></tr>
+    </table>
+    ${detailRows([
+      ['Amount', money(amount), true],
+      ['For', description || 'Monthly fee'],
+    ])}
+    <p style="margin:0 0 16px;font-size:14px;color:#374151;line-height:1.7;">
+      You have not been charged again — upload a clearer receipt and we will review it right away. If you believe this is a mistake, reply to this email and we will look into it.
+    </p>
+    ${button('https://nltc.com.ng/dashboard', 'Upload a New Receipt &rarr;')}`,
+  });
+
+  try {
+    const { error } = await r.emails.send({
+      from: mailFrom(), to: email,
+      subject: 'Action needed — we could not confirm your NLTC payment',
+      html,
+    });
+    if (error) throw new Error(error.message);
+    logger.info('Payment rejected email sent', { email });
+  } catch (err) {
+    logger.error('Failed to send payment rejected email', { email, err: err.message });
+  }
+}
+
+module.exports = {
+  sendWelcomeEmail, verifyTransporter, sendWeeklyProgressEmail, sendInactivityEmail,
+  sendAdminInactivityAlert,
+  sendAdminPaymentReceiptEmail, sendPaymentConfirmedEmail, sendPaymentRejectedEmail,
+};

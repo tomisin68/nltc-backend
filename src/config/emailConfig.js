@@ -8,4 +8,16 @@ const EMAILS_ENABLED = process.env.EMAILS_ENABLED === 'true';
 // Defaults ON — set ADMIN_EMAILS_ENABLED=false to suspend these too.
 const ADMIN_EMAILS_ENABLED = process.env.ADMIN_EMAILS_ENABLED !== 'false';
 
-module.exports = { EMAILS_ENABLED, ADMIN_EMAILS_ENABLED };
+// Payment mail — the admin's "new receipt" alert and the student's
+// confirmed/rejected notice.
+//
+// Deliberately its own switch rather than riding EMAILS_ENABLED. That one is
+// off because welcome notes, weekly reports and inactivity nudges are things
+// NLTC sends; these are things a student is owed. Somebody who has just moved
+// money and is waiting to be let in expects a confirmation, and an admin who
+// does not know a receipt is waiting leaves them locked out — so this defaults
+// ON, and suspending marketing mail does not suspend it.
+// Set PAYMENT_EMAILS_ENABLED=false to turn it off.
+const PAYMENT_EMAILS_ENABLED = process.env.PAYMENT_EMAILS_ENABLED !== 'false';
+
+module.exports = { EMAILS_ENABLED, ADMIN_EMAILS_ENABLED, PAYMENT_EMAILS_ENABLED };
