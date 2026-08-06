@@ -32,7 +32,7 @@ router.post('/on-signup', requireAuth, asyncHandler(async (req, res) => {
   // no role check — any signed-in account can call it — and it writes straight to
   // its own user document, so honouring a client-sent plan meant POSTing
   // {"plan":"pro"} bought a free upgrade. A signup only ever starts on 'free';
-  // paid plans come from the verified Flutterwave path (upgradePlan /
+  // paid plans come from the admin-approved payment path (upgradePlan /
   // markLessonFeePaid), which is also the only place that sets planExpiresAt.
   // An existing plan is preserved so a re-run cannot downgrade a paying student.
   const plan = 'free';

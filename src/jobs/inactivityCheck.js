@@ -19,7 +19,7 @@ function wasSentRecently(tsField) {
 
 /**
  * Returns true only if the student's payment is currently active.
- * Checks both lesson-fee expiry AND Flutterwave plan expiry.
+ * Checks both lesson-fee expiry AND subscription plan expiry.
  * A student whose payment has lapsed is treated as unpaid until re-activated.
  */
 function isCurrentlyPaid(user, now) {
@@ -31,7 +31,7 @@ function isCurrentlyPaid(user, now) {
     if (expDate > now) return true; // fee still valid
   }
 
-  // 2. Active Flutterwave subscription plan (online students)
+  // 2. Active subscription plan (online students)
   if (user.plan === 'pro') {
     const expTs = user.planExpiresAt;
     if (!expTs) return true; // no expiry → recurring subscription still active

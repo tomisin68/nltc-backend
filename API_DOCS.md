@@ -352,178 +352,133 @@ async function loadMyRank() {
 
 ## Payments
 
+> **There is no payment gateway.** Fees are paid by bank transfer to the NLTC
+> account, the student uploads a receipt, and an admin confirms it. The approval
+> is the only thing that grants access — nothing a client sends does.
+>
+> The old Paystack/Flutterwave routes (`/api/flutterwave/*`, `/payment/*`) were
+> removed; they now 404.
+
+**Flow**
+
+1. `GET /api/payments/bank-account` &rarr; where to transfer.
+2. `GET /api/payments/quote` &rarr; how much (priced server-side).
+3. Student transfers, then uploads the receipt to Firebase Storage at
+   `paymentProofs/{uid}/{file}` (storage rules confine that path to them).
+4. `POST /api/payments/proof` with the storage URL + path &rarr; creates a
+   `paymentProofs/{reference}` document at `status: "pending"`, a matching
+   pending row under `users/{uid}/payments/{reference}`, and notifies every
+   admin (in-app + push).
+5. An admin calls `POST /api/payments/proofs/:id/approve`, which grants 30 days
+   of access, flips the payment record to `success`, and notifies the student.
+
 ---
 
-### 6. Initialize Payment
+### 6. Get Bank Account
 
-> Creates a Paystack checkout session and returns a URL to redirect the user to.
+> The account to transfer to. **Public** — the details are payment instructions,
+> not a secret. Overridable from the `settings/bankAccount` Firestore document;
+> falls back to `src/config/bankAccount.js`.
 
 ```
-POST /api/paystack/initialize
+GET /api/payments/bank-account
 ```
 
-**Headers:** `Authorization` required
-
-**Body**
-
-| Field | Type | Required | Values |
-|---|---|---|---|
-| `plan` | string | ✅ | `"pro"` |
-| `callbackUrl` | string | ✅ | Full URL Paystack redirects to after payment |
-
-**Response**
 ```json
 {
   "success": true,
-  "authorizationUrl": "https://checkout.paystack.com/...",
-  "accessCode": "abc123",
-  "reference": "nltc_ref_xyz"
-}
-```
-
-**Plan Prices**
-
-| Plan | Amount |
-|---|---|
-| `pro` | ₦2,000 |
-
-**Example — upgrade button handler**
-```js
-async function startUpgrade(plan) {
-  // The callback URL is where Paystack sends the user after payment
-  const callbackUrl = 'https://nltc-backend.onrender.com/payment/callback';
-
-  const res = await fetch('https://nltc-backend.onrender.com/api/paystack/initialize', {
-    method: 'POST',
-    headers: await authHeaders(),
-    body: JSON.stringify({ plan, callbackUrl }),
-  });
-
-  if (!res.ok) {
-    const err = await res.json();
-    showToast(err.error, 'error');
-    return;
+  "bankAccount": {
+    "accountNumber": "8270157607",
+    "bankName": "Moniepoint",
+    "accountName": "NLTC Global Service- Next level tutorial",
+    "note": "Transfer the exact amount, then upload your receipt below. Confirmation usually takes under 2 hours."
   }
-
-  const { authorizationUrl } = await res.json();
-  window.location.href = authorizationUrl; // redirect to Paystack checkout
 }
-
-// Attach to your upgrade buttons
-document.getElementById('btnUpgradePro').addEventListener('click', () => startUpgrade('pro'));
 ```
 
 ---
 
-### 7. Verify Payment (manual fallback)
+### 7. Get Quote
 
-> Verifies a payment by reference. Use this as a fallback if the webhook didn't fire.
-> The `/payment/callback` redirect (endpoint #8) does this automatically — you usually
-> don't need to call this directly.
+> What the student will be asked to transfer. Priced by the same code that
+> prices the submission, so the figure on the transfer screen cannot drift from
+> the one an admin reviews.
 
 ```
-GET /api/paystack/verify?reference=<reference>
+GET /api/payments/quote?type=lesson_fee&classId=<id>&source=app
+Authorization: Bearer <idToken>
 ```
 
-**Headers:** `Authorization` required
+| Query | Notes |
+|---|---|
+| `type` | `lesson_fee` (default) or `plan_upgrade` |
+| `plan` | `pro` — required for `plan_upgrade` |
+| `classId` | required for `lesson_fee`; the price is read from that class document |
+| `source` | `web` or `app` — the app has its own activation price (`settings.fees.appActivation`) |
 
-**Query Params**
+```json
+{ "success": true, "type": "lesson_fee", "amount": 15000, "description": "Evening Class" }
+```
 
-| Param | Type | Required |
-|---|---|---|
-| `reference` | string | ✅ |
+---
 
-**Response**
+### 8. Submit Payment Proof
+
+> Uploads nothing itself — the client puts the file in Storage first and sends
+> the resulting URL and path here. **No `amount` is accepted**: the price comes
+> from the class document / `settings.fees`.
+
+```
+POST /api/payments/proof
+Authorization: Bearer <idToken>
+```
+
 ```json
 {
-  "success": true,
-  "plan": "pro",
-  "message": "🎉 Welcome to pro! Your plan is now active."
+  "type": "lesson_fee",
+  "receiptUrl": "https://firebasestorage.googleapis.com/...",
+  "receiptPath": "paymentProofs/<uid>/1730900000-receipt.pdf",
+  "receiptName": "receipt.pdf",
+  "receiptType": "application/pdf",
+  "note": "paid from my mum's account",
+  "source": "app",
+  "metadata": { "classId": "<id>" }
 }
 ```
 
-**Example — call from payment result page if webhook hasn't fired yet**
-```js
-async function verifyPayment(reference) {
-  const res = await fetch(
-    `https://nltc-backend.onrender.com/api/paystack/verify?reference=${reference}`,
-    { headers: await authHeaders() }
-  );
-
-  if (!res.ok) {
-    const err = await res.json();
-    showToast(`Payment failed: ${err.error}`, 'error');
-    return false;
-  }
-
-  const data = await res.json();
-  showToast(data.message, 'success');
-  return true;
-}
-```
-
----
-
-### 8. Payment Callback (Paystack Redirect)
-
-> Paystack redirects the user here after checkout. No auth required.
-> It verifies the payment and redirects to your frontend result page.
-
-```
-GET /payment/callback?reference=<reference>
-```
-
-> This is handled automatically — you don't call it from JS.
-> Set `callbackUrl` in endpoint #6 to:
-> ```
-> https://nltc-backend.onrender.com/payment/callback
-> ```
-> After verifying the payment it will redirect the user to:
-> ```
-> https://nltc-online.vercel.app/payment/result?status=success&plan=pro&reference=xxx
-> https://nltc-online.vercel.app/payment/result?status=failed&reference=xxx
-> https://nltc-online.vercel.app/payment/result?status=error&message=...
-> ```
-
-**Example — handle the result on your frontend `/payment/result` page**
-```js
-// On your /payment/result page — read the query params
-const params = new URLSearchParams(window.location.search);
-const status    = params.get('status');    // "success" | "failed" | "error"
-const plan      = params.get('plan');      // "pro"
-const reference = params.get('reference');
-const message   = params.get('message');
-
-if (status === 'success') {
-  showToast(`🎉 Welcome to ${plan}! Your plan is now active.`, 'success');
-  // Reload user profile so the UI reflects the new plan
-  await loadUserProfile();
-} else if (status === 'failed') {
-  showToast('Payment was not completed. Please try again.', 'error');
-} else {
-  showToast(message || 'Something went wrong.', 'error');
-}
-```
-
----
-
-### 9. Paystack Webhook
-
-> Paystack calls this automatically for payment events.
-> You do not call this from the client — it is for Paystack only.
-
-```
-POST /api/paystack/webhook
-```
-
-**Events handled automatically:**
-
-| Event | Action |
+| Status | Meaning |
 |---|---|
-| `charge.success` | Upgrades user plan |
-| `subscription.create` | Activates subscription |
-| `subscription.disable` | Downgrades user to free |
-| `invoice.payment_failed` | Downgrades user to free |
+| `201` | Accepted; returns the created proof |
+| `400` | Receipt path/URL is not this student's, or not an image/PDF |
+| `409` | A receipt is already awaiting review (returns the existing one) |
+
+---
+
+### 9. My Proofs / History
+
+```
+GET /api/payments/proofs/mine     # this student's receipts, newest first
+GET /api/payments/history         # users/{uid}/payments rows
+Authorization: Bearer <idToken>
+```
+
+---
+
+### 10. Review Queue (admin)
+
+```
+GET  /api/payments/proofs?status=pending|approved|rejected|all
+POST /api/payments/proofs/:id/approve      { "note": "optional" }
+POST /api/payments/proofs/:id/reject       { "reason": "required — shown to the student" }
+Authorization: Bearer <adminIdToken>
+```
+
+Approve and reject both claim the proof in a transaction, so two admins hitting
+Approve on the same receipt cannot grant two 30-day windows for one payment —
+the second gets `409`.
+
+Approving runs `markLessonFeePaid` (lesson fee) or `upgradePlan` (plan upgrade),
+writes the `success` payment record, and notifies the student in-app and by push.
 
 ---
 
@@ -668,18 +623,25 @@ export const api = {
   getMyRank: () =>
     apiFetch('/api/gamification/rank'),
 
-  // ── Payments ─────────────────────────────────────
-  initializePayment: (plan) =>
-    apiFetch('/api/paystack/initialize', {
+  // ── Payments (bank transfer + receipt) ───────────
+  getBankAccount: () =>
+    apiFetch('/api/payments/bank-account'),
+
+  getQuote: ({ type = 'lesson_fee', plan, classId, source = 'web' }) =>
+    apiFetch(`/api/payments/quote?${new URLSearchParams({
+      type, source, ...(plan && { plan }), ...(classId && { classId }),
+    })}`),
+
+  // `receiptUrl`/`receiptPath` come from uploading the file to Storage at
+  // paymentProofs/{uid}/… first. No amount — the server prices it.
+  submitProof: (body) =>
+    apiFetch('/api/payments/proof', {
       method: 'POST',
-      body: JSON.stringify({
-        plan,
-        callbackUrl: 'https://nltc-backend.onrender.com/payment/callback',
-      }),
+      body: JSON.stringify(body),
     }),
 
-  verifyPayment: (reference) =>
-    apiFetch(`/api/paystack/verify?reference=${reference}`),
+  myProofs: () =>
+    apiFetch('/api/payments/proofs/mine'),
 
   // ── Agora ─────────────────────────────────────────
   getAgoraToken: (channelName, role = 'audience') =>
@@ -719,9 +681,8 @@ const { token, uid, appId } = await api.getAgoraToken('physics_live_001');
 | Route group | Window | Max requests |
 |---|---|---|
 | All `/api/*` routes | 15 minutes | 100 |
-| `/api/paystack/*` | 15 minutes | 10 |
+| `/api/payments/proof` | 15 minutes | 10 |
 | `/api/agora/token` | 1 minute | 20 |
-| `/api/paystack/webhook` | 1 minute | 30 |
 
 When a rate limit is hit the server returns `429 Too Many Requests`.
 

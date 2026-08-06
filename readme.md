@@ -1,7 +1,7 @@
 # NLTC Backend
 
 Secure Node.js/Express backend for the **Next Level Tutorial Centre** student platform.  
-Handles Agora token generation, Paystack payments, gamification (XP/streaks/achievements), and leaderboards — keeping all secrets off the client.
+Handles Agora token generation, bank-transfer payment review, gamification (XP/streaks/achievements), and leaderboards — keeping all secrets off the client.
 
 ---
 
@@ -14,7 +14,7 @@ Handles Agora token generation, Paystack payments, gamification (XP/streaks/achi
 | Database | Firebase Firestore (via Admin SDK) |
 | Auth | Firebase Auth (ID token verification) |
 | Live Video | Agora RTC token generation |
-| Payments | Paystack NGN checkout + webhooks |
+| Payments | Manual NGN bank transfer - student uploads a receipt, an admin approves it |
 | Rate Limiting | express-rate-limit |
 | Security | helmet, cors |
 | Hosting | Render (free tier works) |
@@ -36,10 +36,9 @@ nltc-backend/
 │   │   ├── health.js        # GET /api/health
 │   │   ├── agora.js         # POST /api/agora/token
 │   │   ├── gamification.js  # POST /api/gamification/xp etc.
-│   │   └── paystack.js      # POST /api/paystack/initialize etc.
+│   │   └── payments.js      # POST /api/payments/proof, /proofs/:id/approve etc.
 │   ├── services/
 │   │   ├── agoraService.js       # RTC token builder
-│   │   ├── paystackService.js    # Paystack API + webhook verification
 │   │   └── gamificationService.js # XP, streaks, achievements, leaderboard
 │   └── server.js            # Express app entry point
 ├── .env.example             # Copy to .env — fill in your keys
@@ -83,11 +82,10 @@ Copy `.env.example` → `.env` and fill in every value.
 2. Create a project → copy **App ID** and **App Certificate**
 3. Enable **APP ID + Token** authentication mode
 
-### Paystack
-1. Go to [Paystack Dashboard](https://dashboard.paystack.com) → **Settings → API Keys**
-2. Copy **Secret Key** (starts with `sk_live_` or `sk_test_`)
-3. Under **Webhooks**, add your Render URL: `https://your-app.onrender.com/api/paystack/webhook`
-4. Copy the webhook secret Paystack shows you
+### Payments
+No gateway keys to set up — payments are bank transfers confirmed by an admin.
+The destination account lives in `src/config/bankAccount.js` and can be
+overridden at runtime from the `settings/bankAccount` Firestore document.
 
 ---
 
@@ -134,20 +132,24 @@ Returns: { token, channelName, uid, appId, expiresAt }
 
 ---
 
-### Paystack
+### Payments
 ```
-POST /api/paystack/initialize
-Headers: Authorization: Bearer <token>
-Body: { "plan": "pro", "callbackUrl": "https://yoursite.com/payment-success" }
-Returns: { authorizationUrl, accessCode, reference }
+GET  /api/payments/bank-account          (public — where to transfer)
 
-GET /api/paystack/verify?reference=xxx
+GET  /api/payments/quote?type=lesson_fee&classId=xxx
 Headers: Authorization: Bearer <token>
-Returns: { success, plan }
+Returns: { amount, description }         (priced server-side, never by the caller)
 
-POST /api/paystack/webhook
-(Called by Paystack directly — no auth header, HMAC-verified)
+POST /api/payments/proof
+Headers: Authorization: Bearer <token>
+Body: { type, receiptUrl, receiptPath, metadata: { classId } }
+Returns: { proof }                       201, or 409 if one is already under review
+
+GET  /api/payments/proofs?status=pending      (admin — the review queue)
+POST /api/payments/proofs/:id/approve         (admin — grants 30 days)
+POST /api/payments/proofs/:id/reject          (admin — body: { reason })
 ```
+See `API_DOCS.md` for the full flow.
 
 ---
 
@@ -179,14 +181,14 @@ const agoraRes = await fetch('https://your-backend.onrender.com/api/agora/token'
 });
 const { token: agoraToken, uid, appId } = await agoraRes.json();
 
-// Start Paystack checkout
-const paystackRes = await fetch('https://your-backend.onrender.com/api/paystack/initialize', {
+// Submit proof of a bank transfer. The file goes to Firebase Storage at
+// paymentProofs/{uid}/... first; no amount is sent, the server prices it.
+await fetch('https://your-backend.onrender.com/api/payments/proof', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-  body: JSON.stringify({ plan: 'pro', callbackUrl: 'https://yoursite.com/success' }),
+  body: JSON.stringify({ type: 'lesson_fee', receiptUrl, receiptPath, metadata: { classId } }),
 });
-const { authorizationUrl } = await paystackRes.json();
-window.location.href = authorizationUrl; // redirect to Paystack checkout
+// Access is granted when an admin approves it, not here.
 ```
 
 ---
@@ -212,9 +214,8 @@ Render's free tier spins down after 15 min of inactivity. Add a health-check pin
 | Route group | Window | Max requests |
 |---|---|---|
 | All `/api/*` | 15 min | 100 per IP |
-| Auth-sensitive (Paystack init) | 15 min | 10 per IP |
+| Auth-sensitive (payment proof) | 15 min | 10 per IP |
 | Agora token | 1 min | 20 per IP |
-| Paystack webhook | 1 min | 30 per IP |
 
 All limits are configurable via `.env`.
 
@@ -224,6 +225,6 @@ All limits are configurable via `.env`.
 
 - Firebase ID tokens are verified on **every request** — the backend never trusts the client
 - Agora App Certificate never leaves the server — clients only get short-lived tokens
-- Paystack webhooks are validated with HMAC-SHA512 before any plan upgrade happens
+- Payment amounts are read from the class document server-side, never from the request, and only an admin approval grants access
 - `helmet` sets security headers (XSS protection, HSTS, etc.)
 - The `.env` file is in `.gitignore` — never commit it
