@@ -12,6 +12,41 @@ const { EMAILS_ENABLED, ADMIN_EMAILS_ENABLED } = require('../config/emailConfig'
 
 const router = express.Router();
 
+/**
+ * Validate a `ref` from a shared link into a `referredBy` patch.
+ *
+ * Returns an empty object for anything it cannot vouch for, so a bad or
+ * mischievous ref costs the referrer their credit and nothing else — a signup
+ * must never fail because of the link somebody arrived through.
+ *
+ * @param {FirebaseFirestore.Firestore} db
+ * @param {string} uid   the account being created
+ * @param {unknown} ref  raw value off the request body
+ */
+async function resolveReferrer(db, uid, ref) {
+  if (typeof ref !== 'string') return {};
+
+  const referrer = ref.trim();
+  // Firebase uids are 28 chars; the bound is a sanity check, not a format rule.
+  if (!referrer || referrer.length > 128) return {};
+
+  // Crediting yourself is the obvious way to game this, and the only one worth
+  // spending a read on blocking.
+  if (referrer === uid) return {};
+
+  try {
+    const snap = await db.collection('users').doc(referrer).get();
+    if (!snap.exists) return {};
+    return {
+      referredBy:   referrer,
+      referredAt:   admin.firestore.FieldValue.serverTimestamp(),
+    };
+  } catch (err) {
+    logger.warn('Referrer lookup failed', { uid, referrer, err: err.message });
+    return {};
+  }
+}
+
 // ─── POST /api/users/on-signup ───────────────────────────────────────────────
 // Called by the frontend immediately after Firebase createUserWithEmailAndPassword.
 // Creates the Firestore user document, sends a welcome notification to the
@@ -78,6 +113,17 @@ router.post('/on-signup', requireAuth, asyncHandler(async (req, res) => {
         createdAt:    admin.firestore.FieldValue.serverTimestamp(),
       };
 
+  // Who sent this student here, if anybody. Recorded server-side because the
+  // Firestore rules pin a new profile to a fixed key list (validNewUser), so a
+  // client that tried to write this would have its whole signup rejected.
+  //
+  // Only ever set on a genuinely new document: attribution is a fact about how
+  // an account started, and a re-run of this endpoint must not be able to
+  // rewrite it in somebody else's favour.
+  const referralPatch = existing.exists
+    ? {}
+    : await resolveReferrer(db, uid, req.body.ref);
+
   // 2. Create / merge the user document
   await db.collection('users').doc(uid).set(
     {
@@ -91,6 +137,7 @@ router.post('/on-signup', requireAuth, asyncHandler(async (req, res) => {
       role:         assignedRole,
       ...freshPatch,
       ...trialPatch,
+      ...referralPatch,
       updatedAt:    admin.firestore.FieldValue.serverTimestamp(),
     },
     { merge: true }
