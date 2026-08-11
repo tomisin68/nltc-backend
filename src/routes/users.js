@@ -6,6 +6,7 @@ const asyncHandler             = require('../utils/asyncHandler');
 const logger                   = require('../utils/logger');
 const { getDb }                = require('../../config/firebase');
 const { sendInAppNotification, sendPushToTokens } = require('../services/notificationService');
+const { creditReferral } = require('../services/referralService');
 const { sendWelcomeEmail, verifyTransporter } = require('../services/emailService');
 const { requireAdmin } = require('../middleware/auth');
 const { EMAILS_ENABLED, ADMIN_EMAILS_ENABLED } = require('../config/emailConfig');
@@ -18,6 +19,10 @@ const router = express.Router();
  * Returns an empty object for anything it cannot vouch for, so a bad or
  * mischievous ref costs the referrer their credit and nothing else — a signup
  * must never fail because of the link somebody arrived through.
+ *
+ * A patch from here is also what triggers the referrer's XP, so every guard
+ * below is a payout guard too: the self-referral check is the difference
+ * between a link and a way to print XP by making accounts.
  *
  * @param {FirebaseFirestore.Firestore} db
  * @param {string} uid   the account being created
@@ -143,7 +148,15 @@ router.post('/on-signup', requireAuth, asyncHandler(async (req, res) => {
     { merge: true }
   );
 
-  // 2. Welcome in-app notification to the new student
+  // 3. Pay the referrer. After the document exists, because the credit is
+  // keyed against this uid and a signup that then failed would have burned the
+  // referrer's one chance to be paid for it. `creditReferral` swallows its own
+  // failures and is idempotent, so this can be awaited without a guard.
+  if (referralPatch.referredBy) {
+    await creditReferral(db, referralPatch.referredBy, uid);
+  }
+
+  // 4. Welcome in-app notification to the new student
   await sendInAppNotification(uid, {
     title:     'Welcome to NLTC! 🎉',
     body:      'Your account is ready. Start learning today.',
@@ -152,7 +165,7 @@ router.post('/on-signup', requireAuth, asyncHandler(async (req, res) => {
     data:      { url: '/student.html' },
   });
 
-  // 3. Welcome FCM push (fire-and-forget — tokens may be registered moments after signup)
+  // 5. Welcome FCM push (fire-and-forget — tokens may be registered moments after signup)
   const fcmTokens = req.body.fcmTokens || req.userData?.fcmTokens || [];
   if (fcmTokens.length) {
     sendPushToTokens(fcmTokens, {
@@ -162,7 +175,7 @@ router.post('/on-signup', requireAuth, asyncHandler(async (req, res) => {
     }).catch(e => logger.error('Welcome push failed', { uid, err: e.message }));
   }
 
-  // 4. Alert all admins of the new signup
+  // 6. Alert all admins of the new signup
   const adminsSnap = await db
     .collection('users')
     .where('role', 'in', ['admin', 'super_admin'])
@@ -185,7 +198,7 @@ router.post('/on-signup', requireAuth, asyncHandler(async (req, res) => {
     await batch.commit();
   }
 
-  // 5. CEO welcome email (fire-and-forget)
+  // 7. CEO welcome email (fire-and-forget)
   sendWelcomeEmail({ email, firstName }).catch(() => {});
 
   logger.info('New student signed up', { uid, email });

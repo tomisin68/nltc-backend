@@ -4,13 +4,20 @@ const { requireAdmin } = require('../middleware/auth');
 const asyncHandler = require('../utils/asyncHandler');
 const logger       = require('../utils/logger');
 const { getDb }    = require('../../config/firebase');
+const { PLAN_FEE_DEFAULTS } = require('../config/plans');
 
 const router = express.Router();
 
+// The Pro package prices come from the plan catalogue, so a price only ever
+// exists in one place — this endpoint publishes the same numbers the quote and
+// the approval are calculated from.
 const DEFAULTS = {
-  proMonthly:        2000,
+  ...PLAN_FEE_DEFAULTS,
   lessonFeeDefault:  5000,
 };
+
+/** Every fee an admin may set. */
+const FEE_KEYS = [...Object.keys(PLAN_FEE_DEFAULTS), 'lessonFeeDefault', 'appActivation'];
 
 // In-memory cache — avoids a Firestore read on every page load.
 let feesCache = null;
@@ -25,7 +32,11 @@ router.get('/fees', asyncHandler(async (req, res) => {
   }
   try {
     const snap = await getDb().collection('settings').doc('fees').get();
-    feesCache   = snap.exists ? snap.data() : DEFAULTS;
+    // Merged over the defaults, not swapped for them: the stored document
+    // predates the quarterly/6-month/yearly packages, and a client that reads
+    // its own fallback for the three missing prices is a client showing a
+    // number the backend will not charge.
+    feesCache   = { ...DEFAULTS, ...(snap.exists ? snap.data() : {}) };
     feesCachedAt = now;
     res.json(feesCache);
   } catch {
@@ -36,11 +47,10 @@ router.get('/fees', asyncHandler(async (req, res) => {
 
 // ─── POST /api/settings/fees (admin only) ────────────────────────────────────
 router.post('/fees', requireAdmin, asyncHandler(async (req, res) => {
-  const { proMonthly, lessonFeeDefault } = req.body;
-
   const updates = {};
-  if (proMonthly       != null) updates.proMonthly       = Number(proMonthly);
-  if (lessonFeeDefault != null) updates.lessonFeeDefault = Number(lessonFeeDefault);
+  for (const key of FEE_KEYS) {
+    if (req.body[key] != null) updates[key] = Number(req.body[key]);
+  }
 
   if (!Object.keys(updates).length) {
     return res.status(400).json({ error: 'Provide at least one fee field to update' });

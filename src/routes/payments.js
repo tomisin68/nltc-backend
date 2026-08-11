@@ -12,23 +12,61 @@ const {
 const asyncHandler    = require('../utils/asyncHandler');
 const logger          = require('../utils/logger');
 const { getDb }       = require('../../config/firebase');
+const {
+  PLAN_IDS, resolvePlan, planPrice, planDescription,
+} = require('../config/plans');
 const admin           = require('firebase-admin');
 const router          = express.Router();
 
 const ACCESS_DAYS = 30;
 const ACCESS_MS   = ACCESS_DAYS * 24 * 60 * 60 * 1000;
+const DAY_MS      = 24 * 60 * 60 * 1000;
 
 // ─── Access grants ──────────────────────────────────────────────────────────
 
-async function upgradePlan(uid, plan, reference) {
-  const expiresAt = new Date(Date.now() + ACCESS_MS);
-  await getDb().collection('users').doc(uid).update({
-    plan,
+/**
+ * Opens (or extends) a Pro window and returns the date it now closes.
+ *
+ * Two things worth knowing:
+ *
+ * `plan` stays the string `'pro'` whichever package was bought. Every access
+ * check on the site and in the app reads `plan === 'pro'`, and writing
+ * `pro_yearly` there would lock out the student who just paid the most. The
+ * package itself is recorded alongside, in `planCycle`.
+ *
+ * Time is added to whatever is left rather than replacing it. A student who
+ * renews a week early is told to "renew before your access expires" by the
+ * dashboard — obeying that and losing the week is not a trade we should be
+ * asking them to make, and it matters far more now that a year is buyable.
+ */
+async function upgradePlan(uid, planId, reference) {
+  const plan = resolvePlan(planId) || resolvePlan('pro');
+  const ref  = getDb().collection('users').doc(uid);
+
+  const snap    = await ref.get();
+  const current = snap.exists ? tsToDate(snap.data().planExpiresAt) : null;
+  const from    = current && current.getTime() > Date.now() ? current : new Date();
+  const expiresAt = new Date(from.getTime() + plan.days * DAY_MS);
+
+  await ref.update({
+    plan:            'pro',
+    planCycle:       plan.cycle,
+    planId:          plan.id,
     paymentRef:      reference,
     planActivatedAt: admin.firestore.FieldValue.serverTimestamp(),
     planExpiresAt:   expiresAt,
     updatedAt:       admin.firestore.FieldValue.serverTimestamp(),
   });
+
+  return expiresAt;
+}
+
+/** A Firestore Timestamp, a Date, or an ISO string — whichever is stored. */
+function tsToDate(value) {
+  if (!value) return null;
+  if (typeof value.toDate === 'function') return value.toDate();
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
 }
 
 async function markLessonFeePaid(uid, meta = {}) {
@@ -51,6 +89,7 @@ async function markLessonFeePaid(uid, meta = {}) {
   if (meta.className) patch.className = meta.className;
   if (meta.classType) patch.classType = meta.classType;
   await getDb().collection('users').doc(uid).update(patch);
+  return expiresAt;
 }
 
 function buildPeriodMeta() {
@@ -62,6 +101,21 @@ function buildPeriodMeta() {
 }
 
 /**
+ * The window a Pro package buys, for the Period column in Payment History.
+ *
+ * A month name is the right label for a monthly fee and a useless one for a
+ * yearly package, so this spells out the range instead: "11 Aug 2026 – 11 Aug
+ * 2027". Dated from now, not from the grant — the grant may stack on top of
+ * days the student had left, and what they bought is still twelve months.
+ */
+function buildPlanPeriodMeta(plan) {
+  const start = new Date();
+  const end   = new Date(start.getTime() + plan.days * DAY_MS);
+  const short = d => d.toLocaleDateString('en-NG', { day: 'numeric', month: 'short', year: 'numeric' });
+  return { periodLabel: `${short(start)} – ${short(end)}`, periodStart: start, periodEnd: end };
+}
+
+/**
  * Writes the row the student sees in Payment History.
  *
  * [isNew] stamps `createdAt`. Approval merges over the same document, and
@@ -69,24 +123,30 @@ function buildPeriodMeta() {
  * got round to it — which is exactly the date the history table sorts on.
  */
 async function savePaymentRecord(uid, { reference, type, plan, amount, description, status, method, isNew = false }) {
+  // Resolved once, and used for both the stored field and the period below —
+  // an omitted `type` must not be a lesson fee in one line and a package in the
+  // next, which is how a monthly centre fee ends up labelled as a year.
+  const paymentType = type || 'lesson_fee';
+  const chosen      = paymentType === 'lesson_fee' ? null : resolvePlan(plan);
+
   const base = {
     uid,
     reference,
-    type:        type || 'lesson_fee',
+    type:        paymentType,
     plan:        plan || null,
     amount:      amount || 0,
-    description: description || (plan ? `${plan} plan upgrade` : 'Lesson fee payment'),
+    description: description || (chosen ? planDescription(chosen) : 'Lesson fee payment'),
     method:      method || 'bank_transfer',
     status,
     updatedAt:   admin.firestore.FieldValue.serverTimestamp(),
   };
   if (isNew) base.createdAt = admin.firestore.FieldValue.serverTimestamp();
-  if (type === 'lesson_fee') {
-    const { periodLabel, periodStart, periodEnd } = buildPeriodMeta();
-    base.periodLabel = periodLabel;
-    base.periodStart = admin.firestore.Timestamp.fromDate(periodStart);
-    base.periodEnd   = admin.firestore.Timestamp.fromDate(periodEnd);
-  }
+
+  const period = chosen ? buildPlanPeriodMeta(chosen) : buildPeriodMeta();
+  base.periodLabel = period.periodLabel;
+  base.periodStart = admin.firestore.Timestamp.fromDate(period.periodStart);
+  base.periodEnd   = admin.firestore.Timestamp.fromDate(period.periodEnd);
+
   await getDb()
     .collection('users').doc(uid)
     .collection('payments').doc(reference)
@@ -110,7 +170,7 @@ function generateReference(uid) {
  * Returns `{ error, status }` instead of throwing so the caller can answer with
  * the right HTTP code.
  */
-async function priceSubmission(db, { paymentType, plan, classId, isApp }) {
+async function priceSubmission(db, { paymentType, plan, classId, isApp, uid, studentMode }) {
   if (paymentType === 'lesson_fee') {
     if (!classId) {
       return { error: 'metadata.classId is required for lesson_fee payments', status: 400 };
@@ -141,18 +201,37 @@ async function priceSubmission(db, { paymentType, plan, classId, isApp }) {
     };
   }
 
+  const chosen = resolvePlan(plan);
+  if (!chosen) return { error: 'That is not a package we offer', status: 400 };
+
+  // Pro packages are how the online campus is billed. A centre student's money
+  // buys a seat in a room, priced by their centre on the class document — so
+  // selling them a "Pro (Yearly)" here would take a year's money for something
+  // their centre never agreed to run. The website only ever offers this flow to
+  // online students; this is the same rule, enforced where it cannot be skipped.
+  let mode = studentMode;
+  if (mode === undefined && uid) {
+    const userSnap = await db.collection('users').doc(uid).get();
+    mode = userSnap.exists ? userSnap.data().studentMode : undefined;
+  }
+  if (mode === 'physical') {
+    return {
+      error:  'Pro packages are for online students. Centre students pay the monthly lesson fee for their centre.',
+      status: 409,
+    };
+  }
+
   const feesSnap = await db.collection('settings').doc('fees').get();
   const fees     = feesSnap.exists ? feesSnap.data() : {};
 
-  // The mobile app charges its own activation price, held in a separate
-  // settings field so changing the app price never silently moves the
-  // website's monthly plan price (and vice versa).
-  const amount = isApp ? (fees.appActivation || 3000) : (fees.proMonthly || 2000);
-
   return {
-    amount:      Math.round(amount),
-    description: `${plan} plan upgrade`,
-    meta:        {},
+    amount:      planPrice(chosen, fees, { isApp }),
+    description: planDescription(chosen),
+    meta: {
+      planId:     chosen.id,
+      planCycle:  chosen.cycle,
+      accessDays: chosen.days,
+    },
   };
 }
 
@@ -341,7 +420,7 @@ router.get('/bank-account', asyncHandler(async (req, res) => {
 router.get('/quote', requireAuth,
   [
     query('type').optional().isIn(['plan_upgrade', 'lesson_fee']),
-    query('plan').optional().isIn(['pro']),
+    query('plan').optional().isIn(PLAN_IDS),
     query('classId').optional().isString().trim().notEmpty(),
     query('source').optional().isIn(['web', 'app']),
   ],
@@ -359,6 +438,7 @@ router.get('/quote', requireAuth,
       plan,
       classId: req.query.classId,
       isApp:   req.query.source === 'app',
+      uid:     req.user.uid,
     });
     if (priced.error) return res.status(priced.status).json({ error: priced.error });
 
@@ -378,7 +458,7 @@ router.get('/quote', requireAuth,
 router.post('/proof', authLimiter, requireAuth,
   [
     body('type').optional().isIn(['plan_upgrade', 'lesson_fee']),
-    body('plan').optional().isIn(['pro']),
+    body('plan').optional().isIn(PLAN_IDS),
     body('receiptUrl').isURL({ protocols: ['https'], require_protocol: true }),
     body('receiptPath').isString().trim().notEmpty(),
     body('receiptName').optional().isString().trim().isLength({ max: 200 }),
@@ -440,8 +520,11 @@ router.post('/proof', authLimiter, requireAuth,
     const priced = await priceSubmission(db, {
       paymentType,
       plan,
-      classId: req.body.metadata?.classId,
-      isApp:   req.body.source === 'app',
+      classId:     req.body.metadata?.classId,
+      isApp:       req.body.source === 'app',
+      uid,
+      // Already read above, so the online-only check costs no extra round trip.
+      studentMode: user.studentMode,
     });
     if (priced.error) return res.status(priced.status).json({ error: priced.error });
 
@@ -582,19 +665,19 @@ router.post('/proofs/:id/approve', requireAdmin,
 
     const { uid, reference, type, plan, amount, description } = proof;
 
-    if (type === 'lesson_fee') {
-      await markLessonFeePaid(uid, proof);
-    } else {
-      await upgradePlan(uid, plan || 'pro', reference);
-    }
+    // The grant decides the date, not a constant next to it. A yearly package
+    // approved here used to be announced to the student as 30 days — and the
+    // confirmation email is the record they keep.
+    const expiresAt = type === 'lesson_fee'
+      ? await markLessonFeePaid(uid, proof)
+      : await upgradePlan(uid, plan || 'pro', reference);
 
     await savePaymentRecord(uid, {
       reference, type, plan, amount,
-      description: description || (type === 'lesson_fee' ? 'Lesson fee payment' : `${plan} plan upgrade`),
+      description: description || (type === 'lesson_fee' ? 'Lesson fee payment' : planDescription(resolvePlan(plan))),
       status: 'success',
     });
 
-    const expiresAt = new Date(Date.now() + ACCESS_MS);
     const prettyExpiry = expiresAt.toLocaleDateString('en-NG', { day: 'numeric', month: 'long', year: 'numeric' });
 
     notifyStudent(db, uid, {

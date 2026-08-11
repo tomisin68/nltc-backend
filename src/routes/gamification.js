@@ -5,6 +5,9 @@ const { validate }   = require('../middleware/validate');
 const asyncHandler   = require('../utils/asyncHandler');
 const logger         = require('../utils/logger');
 const { getDb }      = require('../../config/firebase');
+// Shared with referralService, which also writes weeklyXp — the lazy reset only
+// works if every writer agrees on where the week starts.
+const { getWeekStart } = require('../utils/week');
 const admin          = require('firebase-admin');
 
 const router = express.Router();
@@ -105,17 +108,6 @@ function isYesterday(d) {
   const y = new Date();
   y.setDate(y.getDate() - 1);
   return isSameDay(d, y);
-}
-
-// Returns the ISO date string (YYYY-MM-DD) of the most recent Monday (UTC)
-function getWeekStart() {
-  const now = new Date();
-  const day = now.getUTCDay(); // 0=Sun … 6=Sat
-  const daysBack = day === 0 ? 6 : day - 1;
-  const monday = new Date(now);
-  monday.setUTCDate(now.getUTCDate() - daysBack);
-  monday.setUTCHours(0, 0, 0, 0);
-  return monday.toISOString().slice(0, 10);
 }
 
 // ─── Achievement definitions (mirrors frontend ALL_ACHIEVEMENTS) ──────────────
