@@ -172,6 +172,104 @@ router.post('/chat-message', requireAuth, asyncHandler(async (req, res) => {
   res.json({ success: true, sent: fcmTokens.length, inApp: inAppWrites.length, skipped });
 }));
 
+// ─── POST /api/notifications/group-invite ────────────────────────────────────
+// Called client-side (fire-and-forget) after uids are written into a group's
+// `pendingMembers`. Tells them somebody has asked them to join.
+//
+// Nobody is put into a group any more — they are invited, and the invitation
+// waits in a tray until answered. That makes this notification the only way an
+// invited student finds out at all, which is also why it is checked as hard as
+// it is: the caller must be an admin OF THAT GROUP, and every recipient must
+// actually be sitting in its `pendingMembers`. Without both, an endpoint that
+// pushes named text to a list of uids is a spam cannon.
+//
+// Body: { chatId, uids: [uid], groupName, inviterName }
+router.post('/group-invite', requireAuth, asyncHandler(async (req, res) => {
+  const { chatId, uids, groupName, inviterName } = req.body;
+
+  if (!chatId || !Array.isArray(uids) || !uids.length) {
+    return res.status(400).json({ error: 'chatId and uids are required' });
+  }
+
+  const db       = getDb();
+  const chatSnap = await db.collection('chats').doc(chatId).get();
+
+  if (!chatSnap.exists) {
+    return res.status(404).json({ error: 'Chat not found' });
+  }
+
+  const chat    = chatSnap.data();
+  const admins  = [chat.groupAdmin, ...(chat.groupAdmins || [])].filter(Boolean);
+  const pending = chat.pendingMembers || [];
+
+  if (chat.type !== 'group' || !admins.includes(req.user.uid)) {
+    return res.status(403).json({ error: 'Not an admin of this group' });
+  }
+
+  // Only people the group document itself says are waiting on an invitation.
+  const recipients = uids
+    .filter(uid => typeof uid === 'string' && pending.includes(uid))
+    .slice(0, 100);
+
+  if (!recipients.length) {
+    return res.json({ success: true, sent: 0 });
+  }
+
+  const name    = (groupName   || chat.name || 'a study group').slice(0, 80);
+  const inviter = (inviterName || 'Someone').slice(0, 80);
+  const url     = `https://nltc.com.ng/dashboard?view=chat&invite=${chatId}`;
+
+  const recipientDocs = await Promise.all(
+    recipients.map(uid => db.collection('users').doc(uid).get()),
+  );
+
+  const fcmTokens   = [];
+  const inAppWrites = [];
+
+  for (const snap of recipientDocs) {
+    if (!snap.exists) continue;
+
+    inAppWrites.push({
+      ref:  snap.ref.collection('notifications').doc(),
+      data: {
+        title:     `${inviter} invited you to ${name}`,
+        body:      'You are not in the group until you accept the invitation.',
+        type:      'group_invite',
+        iconEmoji: '👥',
+        data:      { chatId, url },
+        read:      false,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+    });
+
+    // No throttle and no online-skip, unlike a chat message: an invitation is
+    // one event and not a stream of them, and it needs an answer.
+    fcmTokens.push(...(snap.data().fcmTokens || []));
+  }
+
+  if (inAppWrites.length) {
+    const batch = db.batch();
+    inAppWrites.forEach(({ ref, data }) => batch.set(ref, data));
+    await batch.commit();
+  }
+
+  if (fcmTokens.length) {
+    sendPushToTokens(fcmTokens, {
+      title: `👥 ${name}`,
+      body:  `${inviter} invited you to join`,
+      data:  { type: 'group_invite', chatId, url },
+    })
+      .then(r => logger.info('Group invite push sent', {
+        chatId, by: req.user.uid, sent: r.sent, total: r.total,
+      }))
+      .catch(e => logger.error('Group invite push failed', {
+        chatId, err: e.message,
+      }));
+  }
+
+  res.json({ success: true, sent: fcmTokens.length, inApp: inAppWrites.length });
+}));
+
 // ─── POST /api/notifications/register-token ──────────────────────────────────
 router.post('/register-token', requireAuth, asyncHandler(async (req, res) => {
   const { fcmToken, platform } = req.body;
