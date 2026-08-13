@@ -22,6 +22,7 @@ const settingsRouter       = require('./routes/settings');
 const centersRouter        = require('./routes/centers');
 const authCustomRouter     = require('./routes/authCustom');
 const reportsRouter        = require('./routes/reports');
+const studyNotesRouter     = require('./routes/studyNotes');
 const { startWeeklyReportJob }    = require('./jobs/weeklyReport');
 const { startInactivityCheckJob } = require('./jobs/inactivityCheck');
 const { startAccessExpiryJob }    = require('./jobs/accessExpiry');
@@ -103,6 +104,7 @@ app.use('/api/settings',      settingsRouter);
 app.use('/api/centers',       centersRouter);
 app.use('/api/auth',          authCustomRouter);
 app.use('/api/reports',       reportsRouter);
+app.use('/api/study-notes',   studyNotesRouter);
 
 app.use((req,res) => res.status(404).json({ error:`Route not found: ${req.method} ${req.path}` }));
 
