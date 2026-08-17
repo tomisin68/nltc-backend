@@ -26,6 +26,7 @@ const studyNotesRouter     = require('./routes/studyNotes');
 const { startWeeklyReportJob }    = require('./jobs/weeklyReport');
 const { startInactivityCheckJob } = require('./jobs/inactivityCheck');
 const { startAccessExpiryJob }    = require('./jobs/accessExpiry');
+const { startWeeklyRankingJob }   = require('./jobs/weeklyRanking');
 
 initFirebase();
 
@@ -118,6 +119,7 @@ app.listen(PORT, () => {
   startWeeklyReportJob();
   startInactivityCheckJob();
   startAccessExpiryJob();
+  startWeeklyRankingJob();
 });
 
 module.exports = app;
