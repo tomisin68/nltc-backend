@@ -48,7 +48,10 @@ async function upgradePlan(uid, planId, reference) {
   const from    = current && current.getTime() > Date.now() ? current : new Date();
   const expiresAt = new Date(from.getTime() + plan.days * DAY_MS);
 
-  await ref.update({
+  // `set(merge)` rather than `update`: update() rejects outright when the profile
+  // document is missing, and a student who has transferred money is the last
+  // person who should be told "no" because of a bookkeeping gap on our side.
+  await ref.set({
     plan:            'pro',
     planCycle:       plan.cycle,
     planId:          plan.id,
@@ -56,7 +59,7 @@ async function upgradePlan(uid, planId, reference) {
     planActivatedAt: admin.firestore.FieldValue.serverTimestamp(),
     planExpiresAt:   expiresAt,
     updatedAt:       admin.firestore.FieldValue.serverTimestamp(),
-  });
+  }, { merge: true });
 
   return expiresAt;
 }
@@ -88,7 +91,8 @@ async function markLessonFeePaid(uid, meta = {}) {
   if (meta.classId)   patch.classId   = meta.classId;
   if (meta.className) patch.className = meta.className;
   if (meta.classType) patch.classType = meta.classType;
-  await getDb().collection('users').doc(uid).update(patch);
+  // See upgradePlan for why this is a merge and not an update.
+  await getDb().collection('users').doc(uid).set(patch, { merge: true });
   return expiresAt;
 }
 
@@ -668,9 +672,35 @@ router.post('/proofs/:id/approve', requireAdmin,
     // The grant decides the date, not a constant next to it. A yearly package
     // approved here used to be announced to the student as 30 days — and the
     // confirmation email is the record they keep.
-    const expiresAt = type === 'lesson_fee'
-      ? await markLessonFeePaid(uid, proof)
-      : await upgradePlan(uid, plan || 'pro', reference);
+    //
+    // If the grant fails, the receipt goes back in the queue. It has already
+    // been stamped `approved` by the transaction above, and leaving it there
+    // was how a confirmed payment could sit next to an account still reading
+    // "expired": the admin saw an error, pressed Approve again, and got a 409
+    // saying the receipt was already approved — so the grant was never retried
+    // and nothing on either screen said the student was still locked out.
+    let expiresAt;
+    try {
+      expiresAt = type === 'lesson_fee'
+        ? await markLessonFeePaid(uid, proof)
+        : await upgradePlan(uid, plan || 'pro', reference);
+    } catch (err) {
+      await ref.update({
+        status:     'pending',
+        reviewedAt: null,
+        reviewedBy: null,
+        reviewNote: null,
+      }).catch(rollbackErr => logger.error('Could not return receipt to the queue', {
+        reference, uid, error: rollbackErr.message,
+      }));
+      logger.error('Payment approved but access grant failed — receipt returned to queue', {
+        reference, uid, type, plan, error: err.message,
+      });
+      return res.status(500).json({
+        error: 'The payment was confirmed but the account could not be activated. '
+             + 'The receipt is back in the queue — please try again.',
+      });
+    }
 
     await savePaymentRecord(uid, {
       reference, type, plan, amount,
