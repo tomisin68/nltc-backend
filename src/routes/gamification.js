@@ -1,6 +1,6 @@
 const express        = require('express');
 const { body, query }= require('express-validator');
-const { requireAuth }= require('../middleware/auth');
+const { requireAuth, requireAdmin } = require('../middleware/auth');
 const { validate }   = require('../middleware/validate');
 const asyncHandler   = require('../utils/asyncHandler');
 const logger         = require('../utils/logger');
@@ -8,6 +8,7 @@ const { getDb }      = require('../../config/firebase');
 // Shared with referralService, which also writes weeklyXp — the lazy reset only
 // works if every writer agrees on where the week starts.
 const { getWeekStart } = require('../utils/week');
+const { captureWeeklyRanking } = require('../jobs/weeklyRanking');
 const admin          = require('firebase-admin');
 
 const router = express.Router();
@@ -111,15 +112,48 @@ function isYesterday(d) {
 }
 
 // ─── Achievement definitions (mirrors frontend ALL_ACHIEVEMENTS) ──────────────
+//
+// Each test is a statement about the profile, not about the request that
+// happened to be in flight — `first_lesson` asks "has this student ever been
+// paid for a lesson", not "is this call a lesson". That distinction is what lets
+// the same list settle a badge on any read, rather than only on the one award
+// that first crossed the line. See `missingAchievements`.
 const ACHIEVEMENT_CHECKS = [
-  { id: 'first_lesson', test: (_xp, _streak, _cbt, action) => action === 'watch_lesson' },
-  { id: 'streak_3',     test: (_xp, streak)                => streak >= 3 },
-  { id: 'streak_7',     test: (_xp, streak)                => streak >= 7 },
-  { id: 'cbt_5',        test: (_xp, _s, cbt)               => cbt >= 5 },
-  { id: 'cbt_10',       test: (_xp, _s, cbt)               => cbt >= 10 },
-  { id: 'xp_500',       test: (xp)                         => xp >= 500 },
-  { id: 'xp_1000',      test: (xp)                         => xp >= 1000 },
+  { id: 'first_lesson', test: ({ lessonsWatched })  => lessonsWatched >= 1 },
+  { id: 'streak_3',     test: ({ streak })          => streak >= 3 },
+  { id: 'streak_7',     test: ({ streak })          => streak >= 7 },
+  { id: 'cbt_5',        test: ({ cbtCount })        => cbtCount >= 5 },
+  { id: 'cbt_10',       test: ({ cbtCount })        => cbtCount >= 10 },
+  { id: 'xp_500',       test: ({ xp })              => xp >= 500 },
+  { id: 'xp_1000',      test: ({ xp })              => xp >= 1000 },
 ];
+
+/**
+ * Badges this student has earned but does not yet hold.
+ *
+ * Achievements used to be evaluated only on the branch of `awardXP` that
+ * actually paid out. Every idempotent path — the day's second `daily_streak`,
+ * a re-watched lesson, `first_login` after the first — returned before the
+ * checks ran, and any badge whose bar had been crossed on one of those calls
+ * was never written. `first_lesson` was the worst hit: a student who had
+ * watched lessons still had no badge for it, and could only earn it by finding
+ * a video they had never opened before.
+ *
+ * Taking the profile rather than the request makes the answer depend only on
+ * where the student stands, so the same call repairs a gap left months ago.
+ */
+function missingAchievements(profile, overrides = {}) {
+  const held = new Set(profile.achievements || []);
+  const stats = {
+    xp:             overrides.xp             ?? profile.xp             ?? 0,
+    streak:         overrides.streak         ?? profile.streak         ?? 0,
+    cbtCount:       overrides.cbtCount       ?? profile.cbtCount       ?? 0,
+    lessonsWatched: overrides.lessonsWatched ?? profile.lessonsWatched ?? 0,
+  };
+  return ACHIEVEMENT_CHECKS
+    .filter(({ id, test }) => !held.has(id) && test(stats))
+    .map(({ id }) => id);
+}
 
 // ─── Core award function (Firestore transaction) ─────────────────────────────
 async function awardXP(uid, action, meta = {}) {
@@ -152,16 +186,28 @@ async function awardXP(uid, action, meta = {}) {
 
     const profile = snap.data();
 
-    const alreadyPaid = (xp) => ({
-      newXP:              xp,
-      xpEarned:           0,
-      newStreak:          profile.streak || 0,
-      streakBonusAwarded: false,
-      alreadyAwarded:     true,
-      leveledUp:          false,
-      newAchievements:    [],
-      ...xpToLevel(xp),
-    });
+    // No XP this time — but still a chance to settle a badge the student has
+    // already earned and never been given. These branches used to return with
+    // `newAchievements: []` unconditionally, which is how a student could sit
+    // above every threshold with an empty medal row.
+    const alreadyPaid = (xp, { alreadyAwarded = true, overrides = {} } = {}) => {
+      const owed = missingAchievements(profile, overrides);
+      if (owed.length > 0) {
+        tx.update(userRef, {
+          achievements: admin.firestore.FieldValue.arrayUnion(...owed),
+        });
+      }
+      return {
+        newXP:              xp,
+        xpEarned:           0,
+        newStreak:          profile.streak || 0,
+        streakBonusAwarded: false,
+        alreadyAwarded,
+        leveledUp:          false,
+        newAchievements:    owed,
+        ...xpToLevel(xp),
+      };
+    };
 
     // first_login is once-ever — idempotent
     if (action === 'first_login' && profile.firstLoginXpAwarded) {
@@ -173,7 +219,10 @@ async function awardXP(uid, action, meta = {}) {
     // most videos rather than whoever studied. A second viewing is still
     // welcome — it just isn't paid for again.
     if (lessonSnap?.exists) {
-      return alreadyPaid(profile.xp || 0);
+      // The receipt is proof this student has watched a lesson, whatever the
+      // counter says — students from before `lessonsWatched` existed have
+      // receipts and a zero, and this is where they finally collect the badge.
+      return alreadyPaid(profile.xp || 0, { overrides: { lessonsWatched: 1 } });
     }
 
     let xpEarned = computeBaseXP(action, meta);
@@ -186,15 +235,7 @@ async function awardXP(uid, action, meta = {}) {
 
     // daily_streak is idempotent — if already fired today (same day), return no XP
     if (action === 'daily_streak' && last && isSameDay(last, now)) {
-      return {
-        newXP:              profile.xp || 0,
-        xpEarned:           0,
-        newStreak:          streak,
-        streakBonusAwarded: false,
-        leveledUp:          false,
-        newAchievements:    [],
-        ...xpToLevel(profile.xp || 0),
-      };
+      return alreadyPaid(profile.xp || 0, { alreadyAwarded: false });
     }
 
     if (action !== 'first_login') {
@@ -220,15 +261,18 @@ async function awardXP(uid, action, meta = {}) {
     // ── cbtCount: increment atomically on cbt_session ────────────────
     const newCbtCount = (profile.cbtCount || 0) + (action === 'cbt_session' ? 1 : 0);
 
+    // Counts lessons paid for, which is what `first_lesson` is really asking
+    // about. It used to be inferred from the action alone, so the badge existed
+    // only for the instant of the award and was lost with it.
+    const newLessonsWatched = (profile.lessonsWatched || 0) + (lessonRef ? 1 : 0);
+
     // ── Achievements: unlock any newly qualifying badges ──────────────
-    const existing        = profile.achievements || [];
-    const allUnlocked     = [...existing];
-    for (const { id, test } of ACHIEVEMENT_CHECKS) {
-      if (!allUnlocked.includes(id) && test(newXP, streak, newCbtCount, action)) {
-        allUnlocked.push(id);
-      }
-    }
-    const newAchievements = allUnlocked.filter(id => !existing.includes(id));
+    const newAchievements = missingAchievements(profile, {
+      xp:             newXP,
+      streak,
+      cbtCount:       newCbtCount,
+      lessonsWatched: newLessonsWatched,
+    });
 
     // ── Weekly XP: reset on new week (Monday UTC), then add ─────────────
     const currentWeekStart = getWeekStart();
@@ -239,12 +283,19 @@ async function awardXP(uid, action, meta = {}) {
       xp:             newXP,
       streak,
       cbtCount:       newCbtCount,
+      lessonsWatched: newLessonsWatched,
       lastActivityAt: admin.firestore.FieldValue.serverTimestamp(),
       weeklyXp:       newWeeklyXp,
       weekStart:      currentWeekStart,
     };
     if (action === 'first_login') updates.firstLoginXpAwarded = true;
-    if (newAchievements.length > 0) updates.achievements = allUnlocked;
+    // arrayUnion, not the rebuilt array: `GET /rank` awards top_10 / top_50
+    // outside this transaction, and writing a whole list assembled from a
+    // profile read a moment earlier would drop a rank badge that landed in
+    // between.
+    if (newAchievements.length > 0) {
+      updates.achievements = admin.firestore.FieldValue.arrayUnion(...newAchievements);
+    }
 
     tx.update(userRef, updates);
 
@@ -445,11 +496,13 @@ router.get(
   asyncHandler(async (req, res) => {
     const db = getDb();
 
-    const userSnap = await db.collection('users').doc(req.user.uid).get();
+    const userRef  = db.collection('users').doc(req.user.uid);
+    const userSnap = await userRef.get();
     if (!userSnap.exists) return res.status(404).json({ error: 'User not found' });
 
-    const myXP   = userSnap.data().xp    || 0;
-    const streak = userSnap.data().streak || 0;
+    const profile = userSnap.data();
+    const myXP   = profile.xp    || 0;
+    const streak = profile.streak || 0;
 
     let rank = null, totalStudents = null;
     try {
@@ -464,17 +517,40 @@ router.get(
       // Index may still be building — return null rank rather than 500
     }
 
-    // Award top_10 / top_50 achievements if rank qualifies
-    const newAchievements = [];
+    /* Settle every badge this student has earned, not just the rank ones.
+     *
+     * This runs on dashboard load, and it is where a student who has been over
+     * a threshold for months finally gets the medal: `awardXP` can only fix a
+     * gap on a call that happens to come in, and a student between actions
+     * never gets one. Reconciling on a read means the row is right the next
+     * time they open the app.
+     *
+     * `first_lesson` gets a second chance here too. Accounts that pre-date
+     * `lessonsWatched` have no such field, so a single `lessonXp` receipt — one
+     * per video ever paid for — stands in as the evidence.
+     *
+     * Keyed on the field being *absent*, not on it being zero: the first XP
+     * award of any kind writes the counter, so this probe costs one read per
+     * legacy account and then never fires again. Testing for zero instead would
+     * charge a read on every dashboard load, forever, to a student who simply
+     * has not watched a video yet. */
+    const held = new Set(profile.achievements || []);
+    let lessonsWatched = profile.lessonsWatched || 0;
+    if (profile.lessonsWatched === undefined && !held.has('first_lesson')) {
+      const receipt = await userRef.collection('lessonXp').limit(1).get().catch(() => null);
+      if (receipt && !receipt.empty) lessonsWatched = 1;
+    }
+
+    const newAchievements = missingAchievements(profile, { lessonsWatched });
     if (rank !== null) {
-      const existing = userSnap.data().achievements || [];
-      if (rank <= 10 && !existing.includes('top_10')) newAchievements.push('top_10');
-      if (rank <= 50 && !existing.includes('top_50')) newAchievements.push('top_50');
-      if (newAchievements.length > 0) {
-        await db.collection('users').doc(req.user.uid).update({
-          achievements: admin.firestore.FieldValue.arrayUnion(...newAchievements),
-        });
-      }
+      if (rank <= 10 && !held.has('top_10')) newAchievements.push('top_10');
+      if (rank <= 50 && !held.has('top_50')) newAchievements.push('top_50');
+    }
+    if (newAchievements.length > 0) {
+      await userRef.update({
+        achievements: admin.firestore.FieldValue.arrayUnion(...newAchievements),
+      });
+      logger.info('Backfilled achievements', { uid: req.user.uid, newAchievements });
     }
 
     res.json({
@@ -486,6 +562,98 @@ router.get(
       newAchievements,
       ...xpToLevel(myXP),
     });
+  }),
+);
+
+// ─── Weekly ranking archive (admin) ──────────────────────────────────────────
+//
+// The live weekly board only ever shows this week, because `weeklyXp` resets
+// lazily and keeps no history. These read the archive that jobs/weeklyRanking.js
+// writes every Sunday night — which is what makes "who came top in the week of
+// the 4th" a question with an answer, and therefore a week you can reward.
+
+// ─── GET /gamification/weekly-rankings ───────────────────────────────────────
+// Every archived week, newest first — the index for the admin's week picker.
+// Deliberately without the `top` array: forty weeks of fifty students each is a
+// large response to send when all the picker needs is a list of dates.
+router.get(
+  '/weekly-rankings',
+  requireAdmin,
+  [query('limit').optional().isInt({ min: 1, max: 200 })],
+  validate,
+  asyncHandler(async (req, res) => {
+    const lim  = Math.min(parseInt(req.query.limit || '104', 10), 200);
+    const snap = await getDb().collection('weeklyRankings')
+      .orderBy('weekStart', 'desc')
+      .limit(lim)
+      .get();
+
+    res.json({
+      success: true,
+      weeks: snap.docs.map(d => {
+        const w = d.data();
+        return {
+          weekStart:    w.weekStart,
+          weekEnd:      w.weekEnd || null,
+          studentCount: w.studentCount || 0,
+          topXp:        w.topXp || 0,
+          winner:       w.top?.[0]
+            ? {
+                uid:  w.top[0].uid,
+                name: `${w.top[0].firstName || ''} ${w.top[0].lastName || ''}`.trim() || w.top[0].email,
+                weeklyXp: w.top[0].weeklyXp || 0,
+              }
+            : null,
+          capturedAt: w.capturedAt?.toDate?.()?.toISOString() || null,
+        };
+      }),
+    });
+  }),
+);
+
+// ─── GET /gamification/weekly-rankings/:weekStart ────────────────────────────
+// One week's full standings.
+router.get(
+  '/weekly-rankings/:weekStart',
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    const { weekStart } = req.params;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(weekStart)) {
+      return res.status(400).json({ error: 'weekStart must be a YYYY-MM-DD Monday' });
+    }
+
+    const snap = await getDb().collection('weeklyRankings').doc(weekStart).get();
+    if (!snap.exists) return res.status(404).json({ error: 'No ranking archived for that week' });
+
+    const w = snap.data();
+    res.json({
+      success: true,
+      week: {
+        ...w,
+        capturedAt: w.capturedAt?.toDate?.()?.toISOString() || null,
+      },
+    });
+  }),
+);
+
+// ─── POST /gamification/weekly-rankings/capture ──────────────────────────────
+// Archive a week now, rather than waiting for Sunday night.
+//
+// Two jobs. It is how the week in progress gets recorded the first time this
+// ships — otherwise the archive starts a week late and the current week's
+// standings are lost to the reset like every week before it. And it is the
+// retry when the cron did not run, which on a host that sleeps is not rare.
+//
+// Overwrites, so pressing it twice is harmless.
+router.post(
+  '/weekly-rankings/capture',
+  requireAdmin,
+  [body('weekStart').optional().matches(/^\d{4}-\d{2}-\d{2}$/)],
+  validate,
+  asyncHandler(async (req, res) => {
+    const result = await captureWeeklyRanking(req.body.weekStart || getWeekStart());
+    logger.info('Weekly ranking captured manually', { ...result, by: req.user.uid });
+    res.json({ success: true, ...result });
   }),
 );
 
