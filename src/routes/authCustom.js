@@ -205,7 +205,7 @@ router.post('/reset-password', authLimiter, asyncHandler(async (req, res) => {
 // and (b) mail arbitrary addresses on demand. The caller is now the account:
 // uid and email come from the verified ID token. The signup flow already holds
 // a token by the time it calls this, so nothing legitimate loses access.
-router.post('/send-otp', otpLimiter, requireAuth, asyncHandler(async (req, res) => {
+router.post('/send-otp', requireAuth, otpLimiter, asyncHandler(async (req, res) => {
   const uid   = req.user.uid;
   const email = req.user.email;
   if (!email) return res.status(400).json({ error: 'This account has no email address' });
@@ -268,7 +268,7 @@ router.post('/send-otp', otpLimiter, requireAuth, asyncHandler(async (req, res) 
 // guesses — 10^6 codes against an endpoint anyone could call for any account.
 // Now the caller can only verify themselves, and a wrong code costs them one of
 // five attempts before the code is burned and has to be re-sent.
-router.post('/verify-otp', otpLimiter, requireAuth, asyncHandler(async (req, res) => {
+router.post('/verify-otp', requireAuth, otpLimiter, asyncHandler(async (req, res) => {
   const uid = req.user.uid;
   const otp = typeof req.body.otp === 'string' ? req.body.otp.trim() : '';
   if (!otp) return res.status(400).json({ error: 'otp is required' });
@@ -323,7 +323,7 @@ router.post('/verify-otp', otpLimiter, requireAuth, asyncHandler(async (req, res
 // Same footing as /send-otp: the caller can only ever re-send to their own
 // verified-token email address. Resending also resets the attempt counter,
 // which is fine — it costs a fresh unguessable code.
-router.post('/resend-otp', otpLimiter, requireAuth, asyncHandler(async (req, res) => {
+router.post('/resend-otp', requireAuth, otpLimiter, asyncHandler(async (req, res) => {
   const uid   = req.user.uid;
   const email = req.user.email;
   if (!email) return res.status(400).json({ error: 'This account has no email address' });

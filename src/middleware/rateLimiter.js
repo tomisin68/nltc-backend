@@ -31,15 +31,28 @@ const agoraLimiter = rateLimit({
 
 // Email verification (send / resend / verify OTP).
 //
-// Looser than authLimiter on purpose: a physical centre signs a whole class up
-// from one NAT'd IP, and at 20/15min the tail of that class would be locked out
-// of verifying at all. Brute force is held off per-account instead — five wrong
-// codes burns the OTP — so this limit only has to bound mail volume and blind
-// scanning, which 60/15min does comfortably.
-const OTP_MAX = parseInt(process.env.OTP_RATE_LIMIT_MAX || '60', 10);
+// Counted **per account, not per IP**, which matters far more now that
+// verification is compulsory: a physical centre puts a whole class behind one
+// NAT'd address, and every one of those students must now get through this to
+// use the app at all. At 60 requests per IP per 15 minutes — and each student
+// costing a send plus at least one verify — a class of forty arriving together
+// would have run the bucket dry around the twentieth, and the rest would have
+// been held on a screen they could not pass, reading "too many requests" for
+// something they had done once.
+//
+// Keying on the uid also makes the number mean what it should. Nobody
+// legitimately needs fifteen verification requests for one account in a quarter
+// of an hour, and blind scanning is bounded elsewhere: generalLimiter caps every
+// IP at 500/15min before this is reached, and five wrong codes burn the OTP
+// itself. All three routes sit behind requireAuth, so the uid is always there.
+const OTP_MAX = parseInt(process.env.OTP_RATE_LIMIT_MAX || '15', 10);
 
 const otpLimiter = rateLimit({
   windowMs: WINDOW_MS, max: OTP_MAX, standardHeaders: true, legacyHeaders: false,
+  keyGenerator: (req) => (req.user?.uid ? `uid:${req.user.uid}` : `ip:${req.ip}`),
+  // The IPv6-normalisation check only applies to keys that are bare addresses;
+  // these are prefixed and usually a uid, so it would only ever misfire.
+  validate: { ip: false },
   message: { error: 'Too many verification requests. Please wait a few minutes.' },
 });
 
