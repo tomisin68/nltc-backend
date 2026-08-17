@@ -8,6 +8,21 @@ const EMAILS_ENABLED = process.env.EMAILS_ENABLED === 'true';
 // Defaults ON — set ADMIN_EMAILS_ENABLED=false to suspend these too.
 const ADMIN_EMAILS_ENABLED = process.env.ADMIN_EMAILS_ENABLED !== 'false';
 
+// Account mail — the email-verification code and the password reset link.
+//
+// Its own switch for the same reason as payment mail below, only more so: these
+// two are not sent, they are *answered*. Somebody typed their address into a
+// "verify my email" box, or clicked "I forgot my password", and is now sitting
+// on a screen waiting for the code. Riding EMAILS_ENABLED meant suspending the
+// newsletter also silently suspended these — the verification screen kept
+// telling students to check an inbox nothing had been sent to, and a locked-out
+// center manager could request a reset link all day and never get one, with no
+// error anywhere to say why.
+//
+// Defaults ON. Set ACCOUNT_EMAILS_ENABLED=false to turn it off, and understand
+// that doing so locks out anyone who forgets their password.
+const ACCOUNT_EMAILS_ENABLED = process.env.ACCOUNT_EMAILS_ENABLED !== 'false';
+
 // Payment mail — the admin's "new receipt" alert and the student's
 // confirmed/rejected notice.
 //
@@ -20,4 +35,9 @@ const ADMIN_EMAILS_ENABLED = process.env.ADMIN_EMAILS_ENABLED !== 'false';
 // Set PAYMENT_EMAILS_ENABLED=false to turn it off.
 const PAYMENT_EMAILS_ENABLED = process.env.PAYMENT_EMAILS_ENABLED !== 'false';
 
-module.exports = { EMAILS_ENABLED, ADMIN_EMAILS_ENABLED, PAYMENT_EMAILS_ENABLED };
+module.exports = {
+  EMAILS_ENABLED,
+  ADMIN_EMAILS_ENABLED,
+  ACCOUNT_EMAILS_ENABLED,
+  PAYMENT_EMAILS_ENABLED,
+};
